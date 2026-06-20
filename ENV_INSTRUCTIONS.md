@@ -1,0 +1,5 @@
+# Переменные окружения для деплоя
+BOT_TOKEN=8550944942:AAEysTkPbYQoivKjbJ8185AB6M9vwwZ75os
+DATABASE_PATH=tranzit.db
+ADMIN_ID=500694451
+PORT=8080
