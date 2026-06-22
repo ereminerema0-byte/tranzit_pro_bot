@@ -1,0 +1,110 @@
+import aiosqlite
+import asyncio
+from aiogram.fsm.state import State, StatesGroup
+import logging
+
+
+class UserState(StatesGroup):
+    waiting_role = State()
+    waiting_cargo_from = State()
+    waiting_cargo_to = State()
+    waiting_cargo_weight = State()
+    waiting_cargo_price = State()
+    waiting_cargo_phone = State()
+    waiting_truck_from = State()
+    waiting_truck_to = State()
+    waiting_truck_capacity = State()
+    waiting_truck_price = State()
+    waiting_truck_phone = State()
+
+
+DB_NAME = "transit.db"
+
+
+async def init_db():
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS cargo (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            from_city TEXT,
+            to_city TEXT,
+            weight TEXT,
+            price TEXT,
+            phone TEXT
+        )
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS trucks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            from_city TEXT,
+            to_city TEXT,
+            capacity TEXT,
+            price TEXT,
+            phone TEXT
+        )
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            from_city TEXT,
+            to_city TEXT
+        )
+        """)
+        await db.commit()
+
+
+async def add_cargo(user_id, from_city, to_city, weight, price, phone):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO cargo (user_id, from_city, to_city, weight, price, phone) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, from_city, to_city, weight, price, phone)
+        )
+        await db.commit()
+
+
+async def get_cargo_list(from_city=None, to_city=None, exclude_user=None):
+    async with aiosqlite.connect(DB_NAME) as db:
+        query = "SELECT id, from_city, to_city, weight, price, phone FROM cargo WHERE 1=1"
+        params = []
+        if from_city:
+            query += " AND from_city LIKE ?"
+            params.append(f"%{from_city}%")
+        if to_city:
+            query += " AND to_city LIKE ?"
+            params.append(f"%{to_city}%")
+        if exclude_user:
+            query += " AND user_id != ?"
+            params.append(exclude_user)
+        query += " ORDER BY id DESC LIMIT 20"
+        async with db.execute(query, params) as cursor:
+            return await cursor.fetchall()
+
+
+async def get_user_cargo(user_id):
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            "SELECT id, from_city, to_city, weight, price, phone FROM cargo WHERE user_id = ? ORDER BY id DESC",
+            (user_id,)
+        ) as cursor:
+            return await cursor.fetchall()
+
+
+async def add_truck(user_id, from_city, to_city, capacity, price, phone):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO trucks (user_id, from_city, to_city, capacity, price, phone) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, from_city, to_city, capacity, price, phone)
+        )
+        await db.commit()
+
+
+async def get_user_trucks(user_id):
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            "SELECT id, from_city, to_city, capacity, price, phone FROM trucks WHERE user_id = ? ORDER BY id DESC",
+            (user_id,)
+        ) as cursor:
+            return await cursor…
