@@ -1,0 +1,416 @@
+import os
+import asyncio
+import logging
+import aiosqlite
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+logging.basicConfig(level=logging.INFO)
+
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
+DB_PATH = "transit.db"
+
+class UserState(StatesGroup):
+    waiting_cargo_from = State()
+    waiting_cargo_to = State()
+    waiting_cargo_weight = State()
+    waiting_cargo_price = State()
+    waiting_cargo_phone = State()
+    waiting_truck_from = State()
+    waiting_truck_to = State()
+    waiting_truck_capacity = State()
+    waiting_truck_price = State()
+    waiting_truck_phone = State()
+    waiting_subscription_route = State()
+    waiting_role = State()
+
+
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS cargo (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                from_city TEXT,
+                to_city TEXT,
+                weight TEXT,
+                price TEXT,
+                phone TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS trucks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                from_city TEXT,
+                to_city TEXT,
+                capacity TEXT,
+                price TEXT,
+                phone TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                from_city TEXT,
+                to_city TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                role TEXT,
+                phone TEXT
+            )
+        ''')
+        await db.commit()
+
+
+async def add_cargo(user_id, from_city, to_city, weight, price, phone):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO cargo (user_id, from_city, to_city, weight, price, phone) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, from_city, to_city, weight, price, phone)
+        )
+        await db.commit()
+
+
+async def add_truck(user_id, from_city, to_city, capacity, price, phone):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO trucks (user_id, from_city, to_city, capacity, price, phone) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, from_city, to_city, capacity, price, phone)
+        )
+        await db.commit()
+
+
+async def get_cargo_list(from_city=None, to_city=None, exclude_user=None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        query = "SELECT id, from_city, to_city, weight, price, phone FROM cargo WHERE 1=1"
+        params = []
+        if from_city:
+            query += " AND LOWER(from_city) LIKE LOWER(?)"
+            params.append(f"%{from_city}%")
+        if to_city:
+            query += " AND LOWER(to_city) LIKE LOWER(?)"
+            params.append(f"%{to_city}%")
+        if exclude_user:
+            query += " AND user_id != ?"
+            params.append(exclude_user)
+        query += " ORDER BY created_at DESC LIMIT 20"
+        async with db.execute(query, params) as cursor:
+            return await cursor.fetchall()
+
+
+async def get_truck_list(from_city=None, to_city=None, exclude_user=None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        query = "SELECT id, from_city, to_city, capacity, price, phone FROM trucks WHERE 1=1"
+        params = []
+        if from_city:
+            query += " AND LOWER(from_city) LIKE LOWER(?)"
+            params.append(f"%{from_city}%")
+        if to_city:
+            query += " AND LOWER(to_city) LIKE LOWER(?)"
+            params.append(f"%{to_city}%")
+        if exclude_user:
+            query += " AND user_id != ?"
+            params.append(exclude_user)
+        query += " ORDER BY created_at DESC LIMIT 20"
+        async with db.execut…
+
+def role_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="Водитель", callback_data="role_driver"),
+        InlineKeyboardButton(text="Логист", callback_data="role_logist")
+    )
+    return builder.as_markup()
+
+
+def driver_menu_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="Поиск груза", callback_data="search_cargo"))
+    builder.row(InlineKeyboardButton(text="Мои подписки", callback_data="my_subscriptions"))
+    builder.row(InlineKeyboardButton(text="Разместить машину", callback_data="add_truck"))
+    builder.row(InlineKeyboardButton(text="Мои объявления", callback_data="my_trucks"))
+    return builder.as_markup()
+
+
+def logist_menu_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="Разместить груз", callback_data="add_cargo"))
+    builder.row(InlineKeyboardButton(text="Поиск машин", callback_data="search_trucks"))
+    builder.row(InlineKeyboardButton(text="Мои объявления", callback_data="my_cargo"))
+    return builder.as_markup()
+
+
+def back_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="Отмена", callback_data="cancel"))
+    return builder.as_markup()
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Здравствуйте! Я бот ТранзитПро.\n\n"
+        "Помогаю водителям находить грузы, а логистам — машины.\n\n"
+        "Выберите вашу роль:",
+        reply_markup=role_keyboard()
+    )
+    await state.set_state(UserState.waiting_role)
+
+
+@dp.callback_query(F.data.startswith("role_"))
+async def process_role(callback: types.CallbackQuery, state: FSMContext):
+    role = callback.data.split("_")[1]
+    if role == "driver":
+        await callback.message.edit_text(
+            "Режим водителя. Выберите действие:",
+            reply_markup=driver_menu_keyboard()
+        )
+    else:
+        await callback.message.edit_text(
+            "Режим логиста. Выберите действие:",
+            reply_markup=logist_menu_keyboard()
+        )
+    await state.update_data(role=role)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "cancel")
+async def process_cancel(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    role = data.get("role", "driver")
+    if role == "driver":
+        await callback.message.edit_text(
+            "Режим водителя. Выберите действие:",
+            reply_markup=driver_menu_keyboard()
+        )
+    else:
+        await callback.message.edit_text(
+            "Режим логиста. Выберите действие:",
+            reply_markup=logist_menu_keyboard()
+        )
+    await state.clear()
+    await callback.answer()
+
+@dp.callback_query(F.data == "search_cargo")
+async def search_cargo_start(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Введите город отправления (или нажмите Отмена):",
+        reply_markup=back_keyboard()
+    )
+    await state.set_state(UserState.waiting_cargo_from)
+    await callback.answer()
+
+
+@dp.message(UserState.waiting_cargo_from)
+async def process_cargo_from(message: types.Message, state: FSMContext):
+    await state.update_data(cargo_from=message.text)
+    await message.answer("Введите город назначения:")
+    await state.set_state(UserState.waiting_cargo_to)
+
+
+@dp.message(UserState.waiting_cargo_to)
+async def process_cargo_to(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    cargo_from = data.get("cargo_from", "")
+    cargo_list = await get_cargo_list(from_city=cargo_from, to_city=message.text, exclude_user=message.from_user.id)
+
+    if not cargo_list:
+        await message.answer(
+            "Грузы по такому маршруту не найдены. Попробуйте другой маршрут.",
+            reply_markup=driver_menu_keyboard()
+        )
+        await state.clear()
+        return
+
+    text = "Найденные грузы:\n\n"
+    for row in cargo_list:
+        cid, f, t, w, p, ph = row
+        text += f"Груз #{cid}\n{f} -> {t}\nВес: {w} т\nЦена: {p} сум\nТелефон: {ph}\n\n"
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="Подписаться на маршрут", callback_data=f"sub_route:{cargo_from}:{message.text}"))
+    builder.row(InlineKeyboardButton(text="В меню", callback_data="cancel"))
+    await message.answer(text, reply_markup=builder.as_markup())
+    await state.clear()
+
+
+@dp.callback_query(F.data.startswith("sub_route:"))
+async def process_sub_route(callback: types.CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    f = parts[1]
+    t = parts[2]
+    await add_subscription(callback.from_user.id, f, t)
+    await callback.answer("Подписка создана!", show_alert=True)
+    await callback.message.answer(
+        f"Вы подписаны на маршрут: {f} -> {t}\nКогда появятся новые грузы, мы вас оповестим.",
+        reply_markup=driver_menu_keyboard()
+    )
+
+
+@dp.callback_query(F.data == "my_subscriptions")
+async def my_subscriptions(callback: types.CallbackQuery):
+    subs = await get_user_subscriptions(callback.from_user.id)
+    if not subs:
+        await callback.message.edit_text(
+            "У вас нет подписок. Подписаться можно при поиске груза.",
+            reply_markup=driver_menu_keyboard()
+        )
+        return
+    text = "Ваши подписки:\n\n"
+    builder = InlineKeyboardBuilder()
+    for row in subs:
+        sid, f, t = row
+        text += f"#{sid}: {f} -> {t}\n"
+        builder.row(InlineKeyboardButton(text=f"Удалить #{sid}", callback_data=f"del_sub:{sid}"))
+    builder.row(InlineKeyboardButton(text="В меню", callback_data="cancel"))
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("del_sub:"))
+async def delete_sub(callback: types.CallbackQuery):
+    sid = int(callback.data.split(":")[1])
+    await delete_subscription(sid, callback.from_user.id)
+    await callback.answer("Подписка удалена", show_alert=True)
+    subs = await get_user_subscriptions(callback.from_user.id)
+    if not subs:
+        await callback.message.edit_text(
+            "У вас нет подписок.",
+            reply_markup=driver_menu_keyboard()
+        )
+        return
+    text = "Ваши подписки:\n\n"
+    builder = InlineKeyboardBuilder()
+    for row in subs:
+        sid, f, t = row
+        text += f"#{sid}: {f} -> {t}\n"
+        builder.row(InlineKeyboardButton(text=f"Удалить #{sid}", callback_data=f"del_sub:{sid}"))
+    builder.row(InlineKeyboardButton(text="В меню", callback_data="cancel"))
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+
+
+@dp.callback_query(F.data == "add_truck")
+async def add_truck_sta…
+
+@dp.callback_query(F.data == "add_cargo")
+async def add_cargo_start(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Размещение груза.\nВведите город отправления:",
+        reply_markup=back_keyboard()
+    )
+    await state.set_state(UserState.waiting_cargo_weight)
+    await state.update_data(cargo_from=callback.data)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "add_cargo_real")
+async def add_cargo_real(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Размещение груза.\nВведите город отправления:",
+        reply_markup=back_keyboard()
+    )
+    await state.set_state(UserState.waiting_cargo_weight)
+    await callback.answer()
+
+
+@dp.message(UserState.waiting_cargo_weight)
+async def process_cargo_weight(message: types.Message, state: FSMContext):
+    await state.update_data(cargo_weight=message.text)
+    await message.answer("Введите город назначения:")
+    await state.set_state(UserState.waiting_cargo_to)
+
+
+@dp.message(UserState.waiting_cargo_to)
+async def process_cargo_to2(message: types.Message, state: FSMContext):
+    await state.update_data(cargo_to_real=message.text)
+    await message.answer("Введите вес груза (тонн):")
+    await state.set_state(UserState.waiting_cargo_price)
+
+
+@dp.message(UserState.waiting_cargo_price)
+async def process_cargo_price(message: types.Message, state: FSMContext):
+    await state.update_data(cargo_price=message.text)
+    await message.answer("Введите цену (сум):")
+    await state.set_state(UserState.waiting_cargo_phone)
+
+
+@dp.message(UserState.waiting_cargo_phone)
+async def process_cargo_phone(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    await add_cargo(
+        message.from_user.id,
+        data.get("cargo_from_real", ""),
+        data.get("cargo_to_real", ""),
+        data.get("cargo_weight", ""),
+        data.get("cargo_price", ""),
+        message.text
+    )
+    await message.answer(
+        "Груз размещен!",
+        reply_markup=logist_menu_keyboard()
+    )
+    await state.clear()
+
+
+@dp.callback_query(F.data == "search_trucks")
+async def search_trucks(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Введите город отправления (или нажмите Отмена):",
+        reply_markup=back_keyboard()
+    )
+    await state.set_state(UserState.waiting_truck_from)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "my_cargo")
+async def my_cargo(callback: types.CallbackQuery):
+    cargo = await get_user_cargo(callback.from_user.id)
+    if not cargo:
+        await callback.message.edit_text(
+            "У вас нет размещенных грузов.",
+            reply_markup=logist_menu_keyboard()
+        )
+        return
+    text = "Ваши грузы:\n\n"
+    for row in cargo:
+        cid, f, t, w, p, ph = row
+        text += f"Груз #{cid}\n{f} -> {t}\nВес: {w} т\nЦена: {p} сум\nТелефон: {ph}\n\n"
+    await callback.message.edit_text(text, reply_markup=logist_menu_keyboard())
+    await callback.answer()
+
+
+@dp.message(UserState.waiting_cargo_from)
+async def cargo_from_handler(message: types.Message, state: FSMContext):
+    await state.update_data(cargo_from_real=message.text)
+    await message.answer("Введите город назначения:")
+    await state.set_state(UserState.waiting_cargo_to)
+
+
+async def main():
+    await init_db()
+    logging.info("Bot started")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
