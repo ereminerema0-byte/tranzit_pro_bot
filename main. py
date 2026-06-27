@@ -1,416 +1,612 @@
-import os
 import asyncio
 import logging
-import aiosqlite
+import re
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
+from db import init_db, add_user, get_user_role, get_driver_id, get_logistician_id, add_cargo, get_cargo_by_route, get_logistician_cargo, add_vehicle, get_vehicles_by_route, get_driver_vehicles, add_subscription, get_subscribers_for_route
+
+import os
+
+# Bot configuration
+TOKEN = os.getenv("BOT_TOKEN", "8550944942:AAGD35GgkcQn_ys09huAKdlkJT2J4xs0HiA")
+CHANNEL_ID = os.getenv("CHANNEL_ID", "@tranzitpro1")
+CONTACT_USERNAME = os.getenv("CONTACT_USERNAME", "@Oleg34381")
+
+CITY_FLAGS = {
+    "Андижон": "🇺🇿", "Наманган": "🇺🇿", "Ташкент": "🇺🇿", "Самарканд": "🇺🇿", "Бухара": "🇺🇿", 
+    "Фергана": "🇺🇿", "Кашкадарё": "🇺🇿", "Сурхандарё": "🇺🇿", "Хорезм": "🇺🇿", "Навои": "🇺🇿", 
+    "Джизак": "🇺🇿", "Сырдарья": "🇺🇿", "Каракалпакстан": "🇺🇿", "Охонгорон": "🇺🇿",
+    "Москва": "🇷🇺", "Санкт-Петербург": "🇷🇺", "Нижний Новгород": "🇷🇺", "Екатеринбург": "🇷🇺", 
+    "Новосибирск": "🇷🇺", "Казань": "🇷🇺", "Барнаул": "🇷🇺", "Челябинск": "🇷🇺", "Самара": "🇷🇺", 
+    "Ростов": "🇷🇺", "Краснодар": "🇷🇺", "Воронеж": "🇷🇺", "Волгоград": "🇷🇺", "Уфа": "🇷🇺", 
+    "Пермь": "🇷🇺", "Красноярск": "🇷🇺", "Омск": "🇷🇺", "Тюмень": "🇷🇺", "Заринск": "🇷🇺",
+    "Алматы": "🇰🇿", "Астана": "🇰🇿", "Шымкент": "🇰🇿", "Караганда": "🇰🇿",
+    "Бишкек": "🇰🇬", "Ош": "🇰🇬",
+    "Душанбе": "🇹🇯", "Худжанд": "🇹🇯",
+    "Ашхабад": "🇹🇲",
+    "Минск": "🇧🇾",
+    "Берлин": "🇩🇪", "Гамбург": "🇩🇪",
+    "Варшава": "🇵🇱",
+    "Стамбул": "🇹🇷", "Анкара": "🇹🇷",
+    "Пекин": "🇨🇳", "Шанхай": "🇨🇳", "Урумчи": "🇨🇳", "Кашгар": "🇨🇳",
+    "Бейсик": "🇰🇿"
+}
+
+def get_city_with_flag(city_name):
+    if not city_name: return "Не указано"
+    if city_name in CITY_FLAGS:
+        return f"{CITY_FLAGS[city_name]} {city_name}"
+    
+    name_low = city_name.lower()
+    if any(name_low.endswith(x) for x in ["ск", "град", "бург", "ов", "ино", "ево", "ка", "ль", "мь"]):
+        return f"🇷🇺 {city_name}"
+    if any(name_low.endswith(x) for x in ["он", "арё", "ат", "ент", "ан"]):
+        return f"🇺🇿 {city_name}"
+    
+    return city_name
+
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+# Initialize bot and dispatcher
+bot = Bot(token=TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
 
-bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+# Define states for FSM
+class UserRole(StatesGroup):
+    choosing_role = State()
 
-DB_PATH = "transit.db"
+class DriverStates(StatesGroup):
+    main_menu = State()
+    searching_cargo_origin = State()
+    searching_cargo_destination = State()
+    subscribing_origin = State()
+    subscribing_destination = State()
+    adding_vehicle_origin = State()
+    adding_vehicle_origin_country = State()
+    adding_vehicle_destination = State()
+    adding_vehicle_destination_country = State()
+    adding_vehicle_body_type = State()
+    adding_vehicle_capacity = State()
+    adding_vehicle_date = State()
+    adding_vehicle_contact = State()
+    viewing_my_vehicles = State()
 
-class UserState(StatesGroup):
-    waiting_cargo_from = State()
-    waiting_cargo_to = State()
-    waiting_cargo_weight = State()
-    waiting_cargo_price = State()
-    waiting_cargo_phone = State()
-    waiting_truck_from = State()
-    waiting_truck_to = State()
-    waiting_truck_capacity = State()
-    waiting_truck_price = State()
-    waiting_truck_phone = State()
-    waiting_subscription_route = State()
-    waiting_role = State()
+class LogisticianStates(StatesGroup):
+    main_menu = State()
+    choosing_placement_mode = State()
+    single_message_input = State()
+    confirming_cargo = State()
+    adding_cargo_origin = State()
+    adding_cargo_origin_country = State()
+    adding_cargo_destination = State()
+    adding_cargo_destination_country = State()
+    adding_cargo_type = State()
+    adding_cargo_weight = State()
+    adding_cargo_volume = State()
+    adding_cargo_price = State()
+    adding_cargo_date = State()
+    adding_cargo_contact = State()
+    searching_vehicles_origin = State()
+    searching_vehicles_destination = State()
+    viewing_my_cargo = State()
 
+# --- Keyboards ---
 
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS cargo (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                from_city TEXT,
-                to_city TEXT,
-                weight TEXT,
-                price TEXT,
-                phone TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS trucks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                from_city TEXT,
-                to_city TEXT,
-                capacity TEXT,
-                price TEXT,
-                phone TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                from_city TEXT,
-                to_city TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                role TEXT,
-                phone TEXT
-            )
-        ''')
-        await db.commit()
+def get_role_keyboard():
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="🟢 Я водитель"))
+    builder.add(types.KeyboardButton(text="🔵 Я логист"))
+    builder.adjust(2)
+    return builder.as_markup(resize_keyboard=True)
 
+def get_driver_main_keyboard():
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="🔍 Найти груз"))
+    builder.add(types.KeyboardButton(text="🔔 Подписка на направления"))
+    builder.add(types.KeyboardButton(text="🚚 Разместить свободную машину"))
+    builder.add(types.KeyboardButton(text="📋 Мои объявления"))
+    builder.adjust(2)
+    return builder.as_markup(resize_keyboard=True)
 
-async def add_cargo(user_id, from_city, to_city, weight, price, phone):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO cargo (user_id, from_city, to_city, weight, price, phone) VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, from_city, to_city, weight, price, phone)
-        )
-        await db.commit()
+def get_logistician_main_keyboard():
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="📦 Разместить груз"))
+    builder.add(types.KeyboardButton(text="🔍 Найти груз"))
+    builder.add(types.KeyboardButton(text="🚛 Найти свободные машины"))
+    builder.add(types.KeyboardButton(text="📋 Мои объявления"))
+    builder.adjust(2)
+    return builder.as_markup(resize_keyboard=True)
 
+def get_country_keyboard():
+    builder = ReplyKeyboardBuilder()
+    countries = [
+        "🇷🇺 Россия", "🇺🇿 Узбекистан", "🇰🇿 Казахстан", "🇰🇬 Кыргызстан",
+        "🇹🇯 Таджикистан", "🇹🇲 Туркменистан", "🇧🇾 Беларусь", "🇹🇷 Турция",
+        "🇨🇳 Китай", "🇩🇪 Германия", "🇵🇱 Польша", "Другая"
+    ]
+    for country in countries:
+        builder.add(types.KeyboardButton(text=country))
+    builder.adjust(2)
+    return builder.as_markup(resize_keyboard=True)
 
-async def add_truck(user_id, from_city, to_city, capacity, price, phone):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO trucks (user_id, from_city, to_city, capacity, price, phone) VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, from_city, to_city, capacity, price, phone)
-        )
-        await db.commit()
+# --- Handlers ---
 
-
-async def get_cargo_list(from_city=None, to_city=None, exclude_user=None):
-    async with aiosqlite.connect(DB_PATH) as db:
-        query = "SELECT id, from_city, to_city, weight, price, phone FROM cargo WHERE 1=1"
-        params = []
-        if from_city:
-            query += " AND LOWER(from_city) LIKE LOWER(?)"
-            params.append(f"%{from_city}%")
-        if to_city:
-            query += " AND LOWER(to_city) LIKE LOWER(?)"
-            params.append(f"%{to_city}%")
-        if exclude_user:
-            query += " AND user_id != ?"
-            params.append(exclude_user)
-        query += " ORDER BY created_at DESC LIMIT 20"
-        async with db.execute(query, params) as cursor:
-            return await cursor.fetchall()
-
-
-async def get_truck_list(from_city=None, to_city=None, exclude_user=None):
-    async with aiosqlite.connect(DB_PATH) as db:
-        query = "SELECT id, from_city, to_city, capacity, price, phone FROM trucks WHERE 1=1"
-        params = []
-        if from_city:
-            query += " AND LOWER(from_city) LIKE LOWER(?)"
-            params.append(f"%{from_city}%")
-        if to_city:
-            query += " AND LOWER(to_city) LIKE LOWER(?)"
-            params.append(f"%{to_city}%")
-        if exclude_user:
-            query += " AND user_id != ?"
-            params.append(exclude_user)
-        query += " ORDER BY created_at DESC LIMIT 20"
-        async with db.execut…
-
-def role_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="Водитель", callback_data="role_driver"),
-        InlineKeyboardButton(text="Логист", callback_data="role_logist")
-    )
-    return builder.as_markup()
-
-
-def driver_menu_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="Поиск груза", callback_data="search_cargo"))
-    builder.row(InlineKeyboardButton(text="Мои подписки", callback_data="my_subscriptions"))
-    builder.row(InlineKeyboardButton(text="Разместить машину", callback_data="add_truck"))
-    builder.row(InlineKeyboardButton(text="Мои объявления", callback_data="my_trucks"))
-    return builder.as_markup()
-
-
-def logist_menu_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="Разместить груз", callback_data="add_cargo"))
-    builder.row(InlineKeyboardButton(text="Поиск машин", callback_data="search_trucks"))
-    builder.row(InlineKeyboardButton(text="Мои объявления", callback_data="my_cargo"))
-    return builder.as_markup()
-
-
-def back_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="Отмена", callback_data="cancel"))
-    return builder.as_markup()
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        "Здравствуйте! Я бот ТранзитПро.\n\n"
-        "Помогаю водителям находить грузы, а логистам — машины.\n\n"
-        "Выберите вашу роль:",
-        reply_markup=role_keyboard()
-    )
-    await state.set_state(UserState.waiting_role)
-
-
-@dp.callback_query(F.data.startswith("role_"))
-async def process_role(callback: types.CallbackQuery, state: FSMContext):
-    role = callback.data.split("_")[1]
-    if role == "driver":
-        await callback.message.edit_text(
-            "Режим водителя. Выберите действие:",
-            reply_markup=driver_menu_keyboard()
-        )
+@dp.message(CommandStart())
+async def command_start_handler(message: types.Message, state: FSMContext):
+    user_role = get_user_role(message.from_user.id)
+    if user_role == 'driver':
+        await message.answer("С возвращением, водитель!", reply_markup=get_driver_main_keyboard())
+        await state.set_state(DriverStates.main_menu)
+    elif user_role == 'logistician':
+        await message.answer("С возвращением, логист!", reply_markup=get_logistician_main_keyboard())
+        await state.set_state(LogisticianStates.main_menu)
     else:
-        await callback.message.edit_text(
-            "Режим логиста. Выберите действие:",
-            reply_markup=logist_menu_keyboard()
-        )
-    await state.update_data(role=role)
-    await callback.answer()
+        await message.answer("Привет! Я бот для грузоперевозок. Пожалуйста, выберите вашу роль:", reply_markup=get_role_keyboard())
+        await state.set_state(UserRole.choosing_role)
 
+@dp.message(F.text == "🟢 Я водитель")
+async def set_role_driver(message: types.Message, state: FSMContext):
+    add_user(message.from_user.id, "driver")
+    await message.answer("Вы выбрали роль водителя.", reply_markup=get_driver_main_keyboard())
+    await state.set_state(DriverStates.main_menu)
 
-@dp.callback_query(F.data == "cancel")
-async def process_cancel(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    role = data.get("role", "driver")
-    if role == "driver":
-        await callback.message.edit_text(
-            "Режим водителя. Выберите действие:",
-            reply_markup=driver_menu_keyboard()
-        )
+@dp.message(F.text == "🔵 Я логист")
+async def set_role_logistician(message: types.Message, state: FSMContext):
+    add_user(message.from_user.id, "logistician")
+    await message.answer("Вы выбрали роль логиста.", reply_markup=get_logistician_main_keyboard())
+    await state.set_state(LogisticianStates.main_menu)
+
+# --- Driver Handlers ---
+
+@dp.message(F.text == "🔍 Найти груз")
+async def driver_search_cargo_start(message: types.Message, state: FSMContext):
+    await message.answer("Введите город отправления для поиска груза:")
+    await state.set_state(DriverStates.searching_cargo_origin)
+
+@dp.message(DriverStates.searching_cargo_origin)
+async def driver_search_cargo_origin(message: types.Message, state: FSMContext):
+    await state.update_data(search_origin=message.text)
+    await message.answer("Введите город назначения для поиска груза:")
+    await state.set_state(DriverStates.searching_cargo_destination)
+
+@dp.message(DriverStates.searching_cargo_destination)
+async def driver_search_cargo_destination(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    origin = user_data['search_origin']
+    destination = message.text
+    cargo_list = get_cargo_by_route(origin, destination)
+    if cargo_list:
+        response = "Найденные грузы:\n"
+        for cargo in cargo_list:
+            response += f"\nОткуда: {cargo[2]}\nКуда: {cargo[3]}\nТип: {cargo[4]}\nВес: {cargo[5]} кг\nОбъем: {cargo[6]} м³\nЦена: {cargo[7]}\nДата: {cargo[8]}\nКонтакт: {cargo[9]}\n---"
     else:
-        await callback.message.edit_text(
-            "Режим логиста. Выберите действие:",
-            reply_markup=logist_menu_keyboard()
-        )
-    await state.clear()
-    await callback.answer()
+        response = "Грузов по вашему направлению не найдено."
+    
+    role = get_user_role(message.from_user.id)
+    if role == 'logistician':
+        await message.answer(response, reply_markup=get_logistician_main_keyboard())
+        await state.set_state(LogisticianStates.main_menu)
+    else:
+        await message.answer(response, reply_markup=get_driver_main_keyboard())
+        await state.set_state(DriverStates.main_menu)
 
-@dp.callback_query(F.data == "search_cargo")
-async def search_cargo_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        "Введите город отправления (или нажмите Отмена):",
-        reply_markup=back_keyboard()
-    )
-    await state.set_state(UserState.waiting_cargo_from)
-    await callback.answer()
+@dp.message(F.text == "🔔 Подписка на направления")
+async def driver_subscribe_start(message: types.Message, state: FSMContext):
+    await message.answer("Введите город отправления для подписки:")
+    await state.set_state(DriverStates.subscribing_origin)
 
+@dp.message(DriverStates.subscribing_origin)
+async def driver_subscribe_origin(message: types.Message, state: FSMContext):
+    await state.update_data(subscribe_origin=message.text)
+    await message.answer("Введите город назначения для подписки:")
+    await state.set_state(DriverStates.subscribing_destination)
 
-@dp.message(UserState.waiting_cargo_from)
-async def process_cargo_from(message: types.Message, state: FSMContext):
-    await state.update_data(cargo_from=message.text)
-    await message.answer("Введите город назначения:")
-    await state.set_state(UserState.waiting_cargo_to)
+@dp.message(DriverStates.subscribing_destination)
+async def driver_subscribe_destination(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    driver_id = get_driver_id(message.from_user.id)
+    origin = user_data['subscribe_origin']
+    destination = message.text
+    add_subscription(driver_id, origin, destination)
+    await message.answer(f"Вы подписались на направление {origin} -> {destination}. Вы будете получать уведомления о новых грузах.", reply_markup=get_driver_main_keyboard())
+    await state.set_state(DriverStates.main_menu)
 
+@dp.message(F.text == "🚚 Разместить свободную машину")
+async def driver_add_vehicle_start(message: types.Message, state: FSMContext):
+    await message.answer("Введите город отправления:")
+    await state.set_state(DriverStates.adding_vehicle_origin)
 
-@dp.message(UserState.waiting_cargo_to)
-async def process_cargo_to(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    cargo_from = data.get("cargo_from", "")
-    cargo_list = await get_cargo_list(from_city=cargo_from, to_city=message.text, exclude_user=message.from_user.id)
+@dp.message(DriverStates.adding_vehicle_origin)
+async def driver_add_vehicle_origin(message: types.Message, state: FSMContext):
+    await state.update_data(origin=message.text)
+    await message.answer("Выберите страну отправления:", reply_markup=get_country_keyboard())
+    await state.set_state(DriverStates.adding_vehicle_origin_country)
 
-    if not cargo_list:
-        await message.answer(
-            "Грузы по такому маршруту не найдены. Попробуйте другой маршрут.",
-            reply_markup=driver_menu_keyboard()
-        )
-        await state.clear()
-        return
+@dp.message(DriverStates.adding_vehicle_origin_country)
+async def driver_add_vehicle_origin_country(message: types.Message, state: FSMContext):
+    flag = message.text.split()[0] if " " in message.text else ""
+    await state.update_data(origin_flag=flag)
+    await message.answer("Введите город назначения:", reply_markup=types.ReplyKeyboardRemove())
+    await state.set_state(DriverStates.adding_vehicle_destination)
 
-    text = "Найденные грузы:\n\n"
-    for row in cargo_list:
-        cid, f, t, w, p, ph = row
-        text += f"Груз #{cid}\n{f} -> {t}\nВес: {w} т\nЦена: {p} сум\nТелефон: {ph}\n\n"
+@dp.message(DriverStates.adding_vehicle_destination)
+async def driver_add_vehicle_destination(message: types.Message, state: FSMContext):
+    await state.update_data(destination=message.text)
+    await message.answer("Выберите страну назначения:", reply_markup=get_country_keyboard())
+    await state.set_state(DriverStates.adding_vehicle_destination_country)
 
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="Подписаться на маршрут", callback_data=f"sub_route:{cargo_from}:{message.text}"))
-    builder.row(InlineKeyboardButton(text="В меню", callback_data="cancel"))
-    await message.answer(text, reply_markup=builder.as_markup())
-    await state.clear()
+@dp.message(DriverStates.adding_vehicle_destination_country)
+async def driver_add_vehicle_destination_country(message: types.Message, state: FSMContext):
+    flag = message.text.split()[0] if " " in message.text else ""
+    await state.update_data(destination_flag=flag)
+    await message.answer("Введите тип кузова (например, тент, рефрижератор, фургон):", reply_markup=types.ReplyKeyboardRemove())
+    await state.set_state(DriverStates.adding_vehicle_body_type)
 
+@dp.message(DriverStates.adding_vehicle_body_type)
+async def driver_add_vehicle_body_type(message: types.Message, state: FSMContext):
+    await state.update_data(body_type=message.text)
+    await message.answer("Введите грузоподъёмность в тоннах (например, 20):")
+    await state.set_state(DriverStates.adding_vehicle_capacity)
 
-@dp.callback_query(F.data.startswith("sub_route:"))
-async def process_sub_route(callback: types.CallbackQuery, state: FSMContext):
-    parts = callback.data.split(":")
-    f = parts[1]
-    t = parts[2]
-    await add_subscription(callback.from_user.id, f, t)
-    await callback.answer("Подписка создана!", show_alert=True)
-    await callback.message.answer(
-        f"Вы подписаны на маршрут: {f} -> {t}\nКогда появятся новые грузы, мы вас оповестим.",
-        reply_markup=driver_menu_keyboard()
-    )
+@dp.message(DriverStates.adding_vehicle_capacity)
+async def driver_add_vehicle_capacity(message: types.Message, state: FSMContext):
+    await state.update_data(capacity=message.text)
+    await message.answer("Введите дату готовности машины (например, ДД.ММ.ГГГГ):")
+    await state.set_state(DriverStates.adding_vehicle_date)
 
+@dp.message(DriverStates.adding_vehicle_date)
+async def driver_add_vehicle_date(message: types.Message, state: FSMContext):
+    await state.update_data(date=message.text)
+    await message.answer("Введите ваш контакт для связи (телефон или имя пользователя Telegram):")
+    await state.set_state(DriverStates.adding_vehicle_contact)
 
-@dp.callback_query(F.data == "my_subscriptions")
-async def my_subscriptions(callback: types.CallbackQuery):
-    subs = await get_user_subscriptions(callback.from_user.id)
-    if not subs:
-        await callback.message.edit_text(
-            "У вас нет подписок. Подписаться можно при поиске груза.",
-            reply_markup=driver_menu_keyboard()
-        )
-        return
-    text = "Ваши подписки:\n\n"
-    builder = InlineKeyboardBuilder()
-    for row in subs:
-        sid, f, t = row
-        text += f"#{sid}: {f} -> {t}\n"
-        builder.row(InlineKeyboardButton(text=f"Удалить #{sid}", callback_data=f"del_sub:{sid}"))
-    builder.row(InlineKeyboardButton(text="В меню", callback_data="cancel"))
-    await callback.message.edit_text(text, reply_markup=builder.as_markup())
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("del_sub:"))
-async def delete_sub(callback: types.CallbackQuery):
-    sid = int(callback.data.split(":")[1])
-    await delete_subscription(sid, callback.from_user.id)
-    await callback.answer("Подписка удалена", show_alert=True)
-    subs = await get_user_subscriptions(callback.from_user.id)
-    if not subs:
-        await callback.message.edit_text(
-            "У вас нет подписок.",
-            reply_markup=driver_menu_keyboard()
-        )
-        return
-    text = "Ваши подписки:\n\n"
-    builder = InlineKeyboardBuilder()
-    for row in subs:
-        sid, f, t = row
-        text += f"#{sid}: {f} -> {t}\n"
-        builder.row(InlineKeyboardButton(text=f"Удалить #{sid}", callback_data=f"del_sub:{sid}"))
-    builder.row(InlineKeyboardButton(text="В меню", callback_data="cancel"))
-    await callback.message.edit_text(text, reply_markup=builder.as_markup())
-
-
-@dp.callback_query(F.data == "add_truck")
-async def add_truck_sta…
-
-@dp.callback_query(F.data == "add_cargo")
-async def add_cargo_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        "Размещение груза.\nВведите город отправления:",
-        reply_markup=back_keyboard()
-    )
-    await state.set_state(UserState.waiting_cargo_weight)
-    await state.update_data(cargo_from=callback.data)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "add_cargo_real")
-async def add_cargo_real(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        "Размещение груза.\nВведите город отправления:",
-        reply_markup=back_keyboard()
-    )
-    await state.set_state(UserState.waiting_cargo_weight)
-    await callback.answer()
-
-
-@dp.message(UserState.waiting_cargo_weight)
-async def process_cargo_weight(message: types.Message, state: FSMContext):
-    await state.update_data(cargo_weight=message.text)
-    await message.answer("Введите город назначения:")
-    await state.set_state(UserState.waiting_cargo_to)
-
-
-@dp.message(UserState.waiting_cargo_to)
-async def process_cargo_to2(message: types.Message, state: FSMContext):
-    await state.update_data(cargo_to_real=message.text)
-    await message.answer("Введите вес груза (тонн):")
-    await state.set_state(UserState.waiting_cargo_price)
-
-
-@dp.message(UserState.waiting_cargo_price)
-async def process_cargo_price(message: types.Message, state: FSMContext):
-    await state.update_data(cargo_price=message.text)
-    await message.answer("Введите цену (сум):")
-    await state.set_state(UserState.waiting_cargo_phone)
-
-
-@dp.message(UserState.waiting_cargo_phone)
-async def process_cargo_phone(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    await add_cargo(
-        message.from_user.id,
-        data.get("cargo_from_real", ""),
-        data.get("cargo_to_real", ""),
-        data.get("cargo_weight", ""),
-        data.get("cargo_price", ""),
+@dp.message(DriverStates.adding_vehicle_contact)
+async def driver_add_vehicle_contact(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    driver_id = get_driver_id(message.from_user.id)
+    add_vehicle(
+        driver_id,
+        user_data['body_type'],
+        float(user_data['capacity']),
+        user_data['origin'],
+        user_data['destination'],
+        user_data['date'],
         message.text
     )
+    await message.answer("Ваше объявление о свободной машине размещено!", reply_markup=get_driver_main_keyboard())
+    await state.set_state(DriverStates.main_menu)
+
+    # Auto-publish to channel
+    origin_f = f"{user_data.get('origin_flag', '')} {user_data['origin']}".strip()
+    dest_f = f"{user_data.get('destination_flag', '')} {user_data['destination']}".strip()
+    channel_message = (
+        f"🚚 *Свободная машина*\n\n"
+        f"📍 *Откуда:* {origin_f}\n"
+        f"📍 *Куда:* {dest_f}\n"
+        f"📦 *Тип кузова:* {user_data['body_type']}\n"
+        f"⚖️ *Грузоподъёмность:* {user_data['capacity']} т\n"
+        f"📅 *Дата готовности:* {user_data['date']}\n"
+        f"📞 *Контакт:* {CONTACT_USERNAME}\n\n"
+        f"🤖 @tranzit_pro_bot"
+    )
+    try:
+        await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
+    except Exception as e:
+        logging.error(f"Failed to publish to channel: {e}")
+
+@dp.message(F.text == "📋 Мои объявления")
+async def view_my_ads_router(message: types.Message, state: FSMContext):
+    role = get_user_role(message.from_user.id)
+    if role == 'driver':
+        driver_id = get_driver_id(message.from_user.id)
+        vehicles = get_driver_vehicles(driver_id)
+        if vehicles:
+            response = "Ваши объявления о машинах:\n"
+            for vehicle in vehicles:
+                response += f"\nТип кузова: {vehicle[2]}\nГрузоподъёмность: {vehicle[3]} т\nОткуда: {vehicle[4]}\nКуда: {vehicle[5]}\nДата: {vehicle[6]}\nКонтакт: {vehicle[7]}\n---"
+        else:
+            response = "У вас пока нет размещенных объявлений о машинах."
+        await message.answer(response, reply_markup=get_driver_main_keyboard())
+        await state.set_state(DriverStates.main_menu)
+    else:
+        logistician_id = get_logistician_id(message.from_user.id)
+        cargo_list = get_logistician_cargo(logistician_id)
+        if cargo_list:
+            response = "Ваши объявления о грузах:\n"
+            for cargo in cargo_list:
+                response += f"\nОткуда: {cargo[2]}\nКуда: {cargo[3]}\nТип: {cargo[4]}\nВес: {cargo[5]} кг\nОбъем: {cargo[6]} м³\nЦена: {cargo[7]}\nДата: {cargo[8]}\nКонтакт: {cargo[9]}\n---"
+        else:
+            response = "У вас пока нет размещенных объявлений о грузах."
+        await message.answer(response, reply_markup=get_logistician_main_keyboard())
+        await state.set_state(LogisticianStates.main_menu)
+
+# --- Logistician Handlers ---
+
+@dp.message(F.text == "📦 Разместить груз")
+async def logistician_add_cargo_start(message: types.Message, state: FSMContext):
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="Пошагово"))
+    builder.add(types.KeyboardButton(text="Одним сообщением"))
+    builder.add(types.KeyboardButton(text="Назад"))
+    builder.adjust(2)
+    await message.answer("Выберите способ размещения:", reply_markup=builder.as_markup(resize_keyboard=True))
+    await state.set_state(LogisticianStates.choosing_placement_mode)
+
+@dp.message(LogisticianStates.choosing_placement_mode, F.text == "Пошагово")
+async def logistician_add_cargo_step_by_step(message: types.Message, state: FSMContext):
+    await message.answer("Введите город отправления для груза:", reply_markup=types.ReplyKeyboardRemove())
+    await state.set_state(LogisticianStates.adding_cargo_origin)
+
+@dp.message(LogisticianStates.adding_cargo_origin)
+async def logistician_add_cargo_origin(message: types.Message, state: FSMContext):
+    await state.update_data(origin=message.text)
+    await message.answer("Выберите страну отправления:", reply_markup=get_country_keyboard())
+    await state.set_state(LogisticianStates.adding_cargo_origin_country)
+
+@dp.message(LogisticianStates.adding_cargo_origin_country)
+async def logistician_add_cargo_origin_country(message: types.Message, state: FSMContext):
+    flag = message.text.split()[0] if " " in message.text else ""
+    await state.update_data(origin_flag=flag)
+    await message.answer("Введите город назначения для груза:", reply_markup=types.ReplyKeyboardRemove())
+    await state.set_state(LogisticianStates.adding_cargo_destination)
+
+@dp.message(LogisticianStates.adding_cargo_destination)
+async def logistician_add_cargo_destination(message: types.Message, state: FSMContext):
+    await state.update_data(destination=message.text)
+    await message.answer("Выберите страну назначения:", reply_markup=get_country_keyboard())
+    await state.set_state(LogisticianStates.adding_cargo_destination_country)
+
+@dp.message(LogisticianStates.adding_cargo_destination_country)
+async def logistician_add_cargo_destination_country(message: types.Message, state: FSMContext):
+    flag = message.text.split()[0] if " " in message.text else ""
+    await state.update_data(destination_flag=flag)
+    await message.answer("Введите тип груза (например, паллеты, коробки):", reply_markup=types.ReplyKeyboardRemove())
+    await state.set_state(LogisticianStates.adding_cargo_type)
+
+@dp.message(LogisticianStates.adding_cargo_type)
+async def logistician_add_cargo_type(message: types.Message, state: FSMContext):
+    await state.update_data(cargo_type=message.text)
+    await message.answer("Введите вес груза в кг:")
+    await state.set_state(LogisticianStates.adding_cargo_weight)
+
+@dp.message(LogisticianStates.adding_cargo_weight)
+async def logistician_add_cargo_weight(message: types.Message, state: FSMContext):
+    await state.update_data(weight=message.text)
+    await message.answer("Введите объем груза в м³:")
+    await state.set_state(LogisticianStates.adding_cargo_volume)
+
+@dp.message(LogisticianStates.adding_cargo_volume)
+async def logistician_add_cargo_volume(message: types.Message, state: FSMContext):
+    await state.update_data(volume=message.text)
+    await message.answer("Введите цену:")
+    await state.set_state(LogisticianStates.adding_cargo_price)
+
+@dp.message(LogisticianStates.adding_cargo_price)
+async def logistician_add_cargo_price(message: types.Message, state: FSMContext):
+    await state.update_data(price=message.text)
+    await message.answer("Введите дату готовности груза:")
+    await state.set_state(LogisticianStates.adding_cargo_date)
+
+@dp.message(LogisticianStates.adding_cargo_date)
+async def logistician_add_cargo_date(message: types.Message, state: FSMContext):
+    await state.update_data(date=message.text)
+    await message.answer("Введите контакт:")
+    await state.set_state(LogisticianStates.adding_cargo_contact)
+
+@dp.message(LogisticianStates.adding_cargo_contact)
+async def logistician_add_cargo_contact(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    logistician_id = get_logistician_id(message.from_user.id)
+    add_cargo(
+        logistician_id,
+        user_data['origin'],
+        user_data['destination'],
+        user_data['cargo_type'],
+        float(user_data['weight']),
+        float(user_data['volume']),
+        user_data['price'],
+        user_data['date'],
+        message.text
+    )
+    await message.answer("Ваш груз размещен!", reply_markup=get_logistician_main_keyboard())
+    await state.set_state(LogisticianStates.main_menu)
+
+    # Auto-publish to channel
+    origin_f = f"{user_data.get('origin_flag', '')} {user_data['origin']}".strip()
+    dest_f = f"{user_data.get('destination_flag', '')} {user_data['destination']}".strip()
+    channel_message = (
+        f"📦 *Новый груз*\n\n"
+        f"📍 *Откуда:* {origin_f}\n"
+        f"📍 *Куда:* {dest_f}\n"
+        f"🏷️ *Тип груза:* {user_data['cargo_type']}\n"
+        f"⚖️ *Вес:* {user_data['weight']} кг\n"
+        f"📏 *Объем:* {user_data['volume']} м³\n"
+        f"💰 *Цена:* {user_data['price']}\n"
+        f"📅 *Дата готовности:* {user_data['date']}\n"
+        f"📞 *Контакт:* {CONTACT_USERNAME}\n\n"
+        f"🤖 @tranzit_pro_bot"
+    )
+    try:
+        await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
+    except Exception as e:
+        logging.error(f"Failed to publish to channel: {e}")
+
+@dp.message(LogisticianStates.choosing_placement_mode, F.text == "Одним сообщением")
+async def logistician_add_cargo_single_msg(message: types.Message, state: FSMContext):
     await message.answer(
-        "Груз размещен!",
-        reply_markup=logist_menu_keyboard()
+        "Отправьте информацию о грузе одним сообщением в свободной форме.\n\n"
+        "Пример:\n"
+        "Андижон Нижний Новгород\n"
+        "Юк памидор\n"
+        "22 тонна\n"
+        "Реф керак\n"
+        "Выгрузка склад\n"
+        "Аванс бор\n"
+        "Срочно\n"
+        "973439606"
     )
-    await state.clear()
+    await state.set_state(LogisticianStates.single_message_input)
 
+@dp.message(LogisticianStates.choosing_placement_mode, F.text == "Назад")
+async def logistician_add_cargo_back(message: types.Message, state: FSMContext):
+    await message.answer("Главное меню", reply_markup=get_logistician_main_keyboard())
+    await state.set_state(LogisticianStates.main_menu)
 
-@dp.callback_query(F.data == "search_trucks")
-async def search_trucks(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        "Введите город отправления (или нажмите Отмена):",
-        reply_markup=back_keyboard()
+def parse_cargo_block(text):
+    # Adjust price: find XXXX$ and subtract 200
+    def price_sub(match):
+        val = int(match.group(1))
+        return f"{val - 200}$"
+    text = re.sub(r'(\d+)\$', price_sub, text)
+
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    if not lines: return None
+    
+    # Improved city parsing: Look for two distinct city-like words in the first line
+    # Often cities are preceded by flags or separated by spaces/dashes
+    first_line = lines[0]
+    # Remove flags for easier splitting but keep them for display if needed
+    clean_line = re.sub(r'[^\w\s-]', ' ', first_line).strip()
+    parts = [p for p in re.split(r'\s+| - ', clean_line) if p]
+    
+    origin = parts[0] if len(parts) > 0 else "Не указано"
+    destination = parts[1] if len(parts) > 1 else "Не указано"
+    
+    contact = CONTACT_USERNAME
+    weight = "Не указано"
+    body_type = "Не указано"
+    cargo_name = "Не указано"
+    conditions = []
+    
+    # Process remaining lines
+    for i, line in enumerate(lines[1:], 1):
+        low_line = line.lower()
+        # If line contains many digits, it might be an original contact, we skip it as we use global contact
+        if re.search(r'\d{7,}', line.replace(" ", "")):
+            continue
+        
+        if i == 1 and not any(x in low_line for x in ["тонн", " тн", " кг", " т ", "реф", "тент"]):
+            cargo_name = line
+        elif any(x in low_line for x in ["тонн", " тн", " кг", " т "]) or low_line.endswith(" т") or low_line.endswith("т"):
+            weight = line
+        elif any(x in low_line for x in ["реф", "тент", "фургон", "борт", "изотерм"]):
+            body_type = line
+        else:
+            conditions.append(line)
+            
+    return {
+        "origin": origin,
+        "destination": destination,
+        "cargo": cargo_name,
+        "weight_str": weight,
+        "body": body_type,
+        "conditions": ", ".join(conditions) if conditions else "Не указано",
+        "contact": contact
+    }
+
+def format_cargo_message(c):
+    origin_with_flag = get_city_with_flag(c['origin'])
+    dest_with_flag = get_city_with_flag(c['destination'])
+    return (
+        f"📦 *Новое объявление о грузе:*\n\n"
+        f"🔹 *Откуда:* {origin_with_flag}\n"
+        f"🔹 *Куда:* {dest_with_flag}\n"
+        f"🔹 *Груз:* {c['cargo']}\n"
+        f"🔹 *Вес:* {c['weight_str']}\n"
+        f"🔹 *Кузов:* {c['body']}\n"
+        f"🔹 *Условия:* {c['conditions']}\n"
+        f"📞 *Контакт:* {CONTACT_USERNAME}\n"
     )
-    await state.set_state(UserState.waiting_truck_from)
-    await callback.answer()
 
-
-@dp.callback_query(F.data == "my_cargo")
-async def my_cargo(callback: types.CallbackQuery):
-    cargo = await get_user_cargo(callback.from_user.id)
-    if not cargo:
-        await callback.message.edit_text(
-            "У вас нет размещенных грузов.",
-            reply_markup=logist_menu_keyboard()
-        )
+@dp.message(LogisticianStates.single_message_input)
+async def process_single_message_cargo(message: types.Message, state: FSMContext):
+    blocks = [b.strip() for b in message.text.split('\n\n') if b.strip()]
+    parsed_cargoes = []
+    for block in blocks:
+        parsed = parse_cargo_block(block)
+        if parsed: parsed_cargoes.append(parsed)
+            
+    if not parsed_cargoes:
+        await message.answer("Не удалось распознать данные. Пожалуйста, проверьте формат и отправьте еще раз.")
         return
-    text = "Ваши грузы:\n\n"
-    for row in cargo:
-        cid, f, t, w, p, ph = row
-        text += f"Груз #{cid}\n{f} -> {t}\nВес: {w} т\nЦена: {p} сум\nТелефон: {ph}\n\n"
-    await callback.message.edit_text(text, reply_markup=logist_menu_keyboard())
-    await callback.answer()
 
+    await state.update_data(parsed_cargoes=parsed_cargoes)
+    response_text = "📋 *Распознанные объявления:*\n\n"
+    for i, c in enumerate(parsed_cargoes, 1):
+        response_text += f"--- Объявление #{i} ---\n{format_cargo_message(c)}\n"
+    response_text += "\nВсе верно? Каждое объявление будет опубликовано отдельно."
+    
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="Да, всё верно"))
+    builder.add(types.KeyboardButton(text="Нет, ввести заново"))
+    builder.adjust(2)
+    
+    await message.answer(response_text, reply_markup=builder.as_markup(resize_keyboard=True), parse_mode="Markdown")
+    await state.set_state(LogisticianStates.confirming_cargo)
 
-@dp.message(UserState.waiting_cargo_from)
-async def cargo_from_handler(message: types.Message, state: FSMContext):
-    await state.update_data(cargo_from_real=message.text)
+@dp.message(LogisticianStates.confirming_cargo, F.text == "Да, всё верно")
+async def confirm_single_msg_cargo(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    parsed_cargoes = user_data.get('parsed_cargoes', [])
+    logistician_id = get_logistician_id(message.from_user.id)
+    
+    for c in parsed_cargoes:
+        add_cargo(logistician_id, c['origin'], c['destination'], c['cargo'], 0, 0, c['conditions'], "В описании", c['contact'])
+        channel_message = format_cargo_message(c) + f"\n🤖 @tranzit_pro_bot"
+        try:
+            await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
+        except Exception as e:
+            logging.error(f"Failed to publish to channel: {e}")
+            
+    await message.answer("Все объявления опубликованы!", reply_markup=get_logistician_main_keyboard())
+    await state.set_state(LogisticianStates.main_menu)
+
+@dp.message(LogisticianStates.confirming_cargo, F.text == "Нет, ввести заново")
+async def reject_single_msg_cargo(message: types.Message, state: FSMContext):
+    await message.answer("Хорошо, отправьте информацию о грузе заново одним сообщением.")
+    await state.set_state(LogisticianStates.single_message_input)
+
+@dp.message(F.text == "🚛 Найти свободные машины")
+async def search_vehicles_start(message: types.Message, state: FSMContext):
+    await message.answer("Введите город отправления:")
+    await state.set_state(LogisticianStates.searching_vehicles_origin)
+
+@dp.message(LogisticianStates.searching_vehicles_origin)
+async def search_vehicles_origin(message: types.Message, state: FSMContext):
+    await state.update_data(search_origin=message.text)
     await message.answer("Введите город назначения:")
-    await state.set_state(UserState.waiting_cargo_to)
+    await state.set_state(LogisticianStates.searching_vehicles_destination)
 
+@dp.message(LogisticianStates.searching_vehicles_destination)
+async def search_vehicles_destination(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    origin = user_data['search_origin']
+    destination = message.text
+    vehicles = get_vehicles_by_route(origin, destination)
+    if vehicles:
+        response = "Найденные машины:\n"
+        for vehicle in vehicles:
+            response += f"\nТип кузова: {vehicle[2]}\nГрузоподъёмность: {vehicle[3]} т\nОткуда: {vehicle[4]}\nКуда: {vehicle[5]}\nДата: {vehicle[6]}\nКонтакт: {vehicle[7]}\n---"
+    else:
+        response = "Машин по вашему направлению не найдено."
+    await message.answer(response, reply_markup=get_logistician_main_keyboard())
+    await state.set_state(LogisticianStates.main_menu)
+
+# --- Fallback ---
+@dp.message()
+async def echo_handler(message: types.Message):
+    logging.info(f"Unhandled message: {message.text} from {message.from_user.id}")
+    await message.answer("Извините, я не понял эту команду. Пожалуйста, используйте кнопки меню.")
 
 async def main():
-    await init_db()
-    logging.info("Bot started")
+    init_db()
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
