@@ -459,55 +459,81 @@ async def logistician_add_cargo_back(message: types.Message, state: FSMContext):
     await state.set_state(LogisticianStates.main_menu)
 
 def parse_cargo_block(text):
-    # Adjust price: find XXXX$ and subtract 200
-    def price_sub(match):
-        val = int(match.group(1))
-        return f"{val - 200}$"
-    text = re.sub(r'(\d+)\$', price_sub, text)
-
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     if not lines: return None
-    
-    # Improved city parsing: Look for two distinct city-like words in the first line
-    # Often cities are preceded by flags or separated by spaces/dashes
-    first_line = lines[0]
-    # Remove flags for easier splitting but keep them for display if needed
-    clean_line = re.sub(r'[^\w\s-]', ' ', first_line).strip()
-    parts = [p for p in re.split(r'\s+| - ', clean_line) if p]
-    
-    origin = parts[0] if len(parts) > 0 else "Не указано"
-    destination = parts[1] if len(parts) > 1 else "Не указано"
-    
-    contact = CONTACT_USERNAME
-    weight = "Не указано"
-    body_type = "Не указано"
+
+    origins = []
+    destinations = []
     cargo_name = "Не указано"
+    body_type = "Не указано"
     conditions = []
-    
-    # Process remaining lines
-    for i, line in enumerate(lines[1:], 1):
-        low_line = line.lower()
-        # If line contains many digits, it might be an original contact, we skip it as we use global contact
-        if re.search(r'\d{7,}', line.replace(" ", "")):
+    payment = "Не указано"
+
+    # Флаги стран
+    ru_flags = ["🇷🇺"]
+    uz_flags = ["🇺🇿", "УЗБ"]
+    kz_flags = ["🇰🇿"]
+    by_flags = ["🇧🇾"]
+
+    def is_origin(line):
+        return any(f in line for f in ru_flags + kz_flags + by_flags)
+
+    def is_destination(line):
+        return "🇺🇿" in line or "УЗБ" in line
+
+    def clean_city(line):
+        # Убираем флаги и лишние слова
+        line = re.sub(r'[🇷🇺🇺🇿🇰🇿🇧🇾🇰🇬🇹🇯🇹🇲🇩🇪🇵🇱🇹🇷🇨🇳]', '', line)
+        line = re.sub(r'\bУЗБ\b', '', line)
+        return line.strip()
+
+    for line in lines:
+        up = line.upper()
+        low = line.lower()
+
+        # Пропускаем номера телефонов
+        if re.search(r'\+?\d[\d\s]{8,}', line):
             continue
-        
-        if i == 1 and not any(x in low_line for x in ["тонн", " тн", " кг", " т ", "реф", "тент"]):
-            cargo_name = line
-        elif any(x in low_line for x in ["тонн", " тн", " кг", " т "]) or low_line.endswith(" т") or low_line.endswith("т"):
-            weight = line
-        elif any(x in low_line for x in ["реф", "тент", "фургон", "борт", "изотерм"]):
-            body_type = line
+        # Пропускаем контакты типа ТГ ИМО ВАТСАП
+        if any(x in up for x in ["ТГ", "ИМО", "ВАТСАП", "ВАТСАП", "МАХ", "WHATSAPP"]):
+            continue
+        # Пропускаем разделители
+        if re.match(r'^[━=\-_]{3,}$', line):
+            continue
+
+        if is_origin(line):
+            city = clean_city(line)
+            if city:
+                origins.append(city)
+        elif is_destination(line):
+            city = clean_city(line)
+            if city:
+                destinations.append(city)
+        elif any(x in up for x in ["ДСП", "МДФ", "ДВП", "ОСБ", "ФАНЕР", "ЛАМИНАТ", "ДЕКОР", "ПАМИДОР", "ЮКЛА"]):
+            cargo_name = line.strip()
+        elif any(x in low for x in ["реф", "тент", "фургон", "борт"]):
+            body_type = line.strip()
+        elif any(x in up for x in ["ОПЛАТА", "НАЛ", "КОМБО", "АВАНС"]):
+            payment = line.strip()
         else:
-            conditions.append(line)
-            
+            conditions.append(line.strip())
+
+    origin = ", ".join(origins) if origins else "Не указано"
+    destination = ", ".join(destinations) if destinations else "Не указано"
+
+    cond_parts = []
+    if payment != "Не указано":
+        cond_parts.append(payment)
+    cond_parts.extend(conditions)
+
     return {
         "origin": origin,
         "destination": destination,
         "cargo": cargo_name,
-        "weight_str": weight,
+        "weight_str": "Не указано",
         "body": body_type,
-        "conditions": ", ".join(conditions) if conditions else "Не указано",
-        "contact": contact
+        "conditions": ", ".join(cond_parts) if cond_parts else "Не указано",
+        "contact": CONTACT_USERNAME
     }
 
 def format_cargo_message(c):
