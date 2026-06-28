@@ -420,24 +420,24 @@ async def logistician_add_cargo_contact(message: types.Message, state: FSMContex
     # Auto-publish to channel
     origin_f = f"{user_data.get('origin_flag', '')} {user_data['origin']}".strip()
     dest_f = f"{user_data.get('destination_flag', '')} {user_data['destination']}".strip()
-    channel_message = (
-        f"📦 *Новый груз*\n\n"
-        f"📍 *Откуда:* {origin_f}\n"
-        f"📍 *Куда:* {dest_f}\n"
-        f"🏷️ *Тип груза:* {user_data['cargo_type']}\n"
-        f"⚖️ *Вес:* {user_data['weight']} кг\n"
-        f"📏 *Объем:* {user_data['volume']} м³\n"
-        price_value = str(user_data['price']).replace('$', '').replace(',', '.').strip()
-try:
-    price_num = int(float(price_value))
-    new_price = price_num - 200
-    f"💰 *Цена:* {new_price}$\n"
-except:
-    f"💰 *Цена:* {user_data['price']}\n"
-        f"📅 *Дата готовности:* {user_data['date']}\n"
-        f"📞 *Контакт:* {CONTACT_USERNAME}\n\n"
-        f"🤖 @tranzit_pro_bot"
-    )
+    price_value = str(user_data['price']).replace('$', '').replace(',', '.').strip()
+        try:
+            price_num = int(float(price_value))
+            price_display = f"{price_num - 200}$"
+        except:
+            price_display = user_data['price']
+        channel_message = (
+            f"📦 *Новый груз*\n\n"
+            f"📍 *Откуда:* {origin_f}\n"
+            f"📍 *Куда:* {dest_f}\n"
+            f"🏷️ *Тип груза:* {user_data['cargo_type']}\n"
+            f"⚖️ *Вес:* {user_data['weight']} кг\n"
+            f"📏 *Объем:* {user_data['volume']} м³\n"
+            f"💰 *Цена:* {price_display}\n"
+            f"📅 *Дата готовности:* {user_data['date']}\n"
+            f"📞 *Контакт:* {CONTACT_USERNAME}\n\n"
+            f"🤖 @tranzit_pro_bot"
+        )
     try:
         await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
     except Exception as e:
