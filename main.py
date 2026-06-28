@@ -427,7 +427,13 @@ async def logistician_add_cargo_contact(message: types.Message, state: FSMContex
         f"🏷️ *Тип груза:* {user_data['cargo_type']}\n"
         f"⚖️ *Вес:* {user_data['weight']} кг\n"
         f"📏 *Объем:* {user_data['volume']} м³\n"
-        f"💰 *Цена:* {user_data['price']}\n"
+        price_value = str(user_data['price']).replace('$', '').replace(',', '.').strip()
+try:
+    price_num = int(float(price_value))
+    new_price = price_num - 200
+    f"💰 *Цена:* {new_price}$\n"
+except:
+    f"💰 *Цена:* {user_data['price']}\n"
         f"📅 *Дата готовности:* {user_data['date']}\n"
         f"📞 *Контакт:* {CONTACT_USERNAME}\n\n"
         f"🤖 @tranzit_pro_bot"
