@@ -461,81 +461,93 @@ async def logistician_add_cargo_back(message: types.Message, state: FSMContext):
 def parse_cargo_block(text):
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     if not lines: return None
-
-    origins = []
-    destinations = []
+    
+    full_text = ' '.join(lines)
+    
+    origin = "Не указано"
+    destination = "Не указано"
     cargo_name = "Не указано"
     body_type = "Не указано"
+    weight_str = "Не указано"
     conditions = []
-    payment = "Не указано"
-
-    # Флаги стран
-    ru_flags = ["🇷🇺"]
-    uz_flags = ["🇺🇿", "УЗБ"]
-    kz_flags = ["🇰🇿"]
-    by_flags = ["🇧🇾"]
-
-    def is_origin(line):
-        return any(f in line for f in ru_flags + kz_flags + by_flags)
-
-    def is_destination(line):
-        return "🇺🇿" in line or "УЗБ" in line
-
-    def clean_city(line):
-        # Убираем флаги и лишние слова
-        line = re.sub(r'[🇷🇺🇺🇿🇰🇿🇧🇾🇰🇬🇹🇯🇹🇲🇩🇪🇵🇱🇹🇷🇨🇳]', '', line)
-        line = re.sub(r'\bУЗБ\b', '', line)
-        return line.strip()
-
-    for line in lines:
-        up = line.upper()
-        low = line.lower()
-
-        # Пропускаем номера телефонов
-        if re.search(r'\+?\d[\d\s]{8,}', line):
-            continue
-        # Пропускаем контакты типа ТГ ИМО ВАТСАП
-        if any(x in up for x in ["ТГ", "ИМО", "ВАТСАП", "ВАТСАП", "МАХ", "WHATSAPP"]):
-            continue
-        # Пропускаем разделители
-        if re.match(r'^[━=\-_]{3,}$', line):
-            continue
-
-        if is_origin(line):
-            city = clean_city(line)
-            if city:
-                origins.append(city)
-        elif is_destination(line):
-            city = clean_city(line)
-            if city:
-                destinations.append(city)
-        elif any(x in up for x in ["ДСП", "МДФ", "ДВП", "ОСБ", "ФАНЕР", "ЛАМИНАТ", "ДЕКОР", "ПАМИДОР", "ЮКЛА"]):
-            cargo_name = line.strip()
-        elif any(x in low for x in ["реф", "тент", "фургон", "борт"]):
-            body_type = line.strip()
-        elif any(x in up for x in ["ОПЛАТА", "НАЛ", "КОМБО", "АВАНС"]):
-            payment = line.strip()
+    
+    # Разбиваем по тильде ~
+    if '~' in full_text:
+        parts = full_text.split('~', 1)
+        left = parts[0].strip()
+        right = parts[1].strip()
+        
+        # Из левой части убираем дату типа "29.06.26г."
+        left = re.sub(r'^\d{1,2}\.\d{1,2}\.\d{2,4}[гГ]?\.\s*', '', left).strip()
+        # Убираем скобки типа (Тошбулок)
+        origin = re.sub(r'\(.*?\)', '', left).strip()
+        
+        # Из правой части берём первое слово как город назначения
+        # Убираем скобки типа (Барановичи) или (ул. Промышленная)
+        right_clean = re.sub(r'\(.*?\)', '', right).strip()
+        right_words = right_clean.split()
+        
+        # Город назначения — первое слово с большой буквы
+        dest_words = []
+        rest_start = 0
+        for i, word in enumerate(right_words):
+            if word[0].isupper() and re.match(r'^[А-ЯЁA-Z]', word):
+                dest_words.append(word)
+                rest_start = i + 1
+            else:
+                break
+        
+        destination = ' '.join(dest_words) if dest_words else right_words[0] if right_words else "Не указано"
+        rest_words = right_words[rest_start:]
+        rest = ' '.join(rest_words)
+        
+        # Ищем вес
+        weight_match = re.search(r'(\d+[\.,]?\d*)\s*(тн|тонн|кг)', rest, re.IGNORECASE)
+        if weight_match:
+            weight_str = f"{weight_match.group(1)} {weight_match.group(2)}"
+        
+        # Ищем кузов
+        if re.search(r'\bтент\b', rest, re.IGNORECASE):
+            body_type = "Тент"
+        elif re.search(r'\bреф\b', rest, re.IGNORECASE):
+            body_type = "Реф"
+        elif re.search(r'\bфургон\b', rest, re.IGNORECASE):
+            body_type = "Фургон"
+        elif re.search(r'\bборт\b', rest, re.IGNORECASE):
+            body_type = "Борт"
+        
+        # Ищем груз — ищем существительное после "растоможка Город"
+        cargo_match = re.search(
+            r'(?:растаможка|растоможка)\s+\S+\s+([А-ЯЁ][а-яё]+)',
+            rest, re.IGNORECASE
+        )
+        if cargo_match:
+            cargo_name = cargo_match.group(1)
         else:
-            conditions.append(line.strip())
-
-    origin = ", ".join(origins) if origins else "Не указано"
-    destination = ", ".join(destinations) if destinations else "Не указано"
-
-    cond_parts = []
-    if payment != "Не указано":
-        cond_parts.append(payment)
-    cond_parts.extend(conditions)
-
+            # Берём первое слово с большой буквы которое не город и не служебное
+            skip_words = {'растаможка', 'растоможка', 'тент', 'реф', 'фургон', 'борт', 'керак', 'бор'}
+            for word in rest.split():
+                clean_word = re.sub(r'[^\w]', '', word)
+                if (clean_word and clean_word[0].isupper() and 
+                    re.match(r'^[А-ЯЁ]', clean_word) and 
+                    clean_word.lower() not in skip_words):
+                    cargo_name = clean_word
+                    break
+        
+        # Условия — весь остаток
+        cond = rest
+        if cond.strip():
+            conditions.append(cond.strip())
+    
     return {
         "origin": origin,
         "destination": destination,
         "cargo": cargo_name,
-        "weight_str": "Не указано",
+        "weight_str": weight_str,
         "body": body_type,
-        "conditions": ", ".join(cond_parts) if cond_parts else "Не указано",
+        "conditions": ", ".join(conditions) if conditions else "Не указано",
         "contact": CONTACT_USERNAME
     }
-
 def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c['origin'])
     dest_with_flag = get_city_with_flag(c['destination'])
