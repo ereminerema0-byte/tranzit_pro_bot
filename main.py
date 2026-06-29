@@ -557,6 +557,7 @@ def parse_cargo_block(text):
 def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c['origin'])
     dest_with_flag = get_city_with_flag(c['destination'])
+    message += f"\n\n🤖 *Хотите быстро найти подходящий груз?*\nНапишите боту @tranzit_pro_bot и выберите маршрут"
     return (
         f"📦 *Новое объявление о грузе:*\n\n"
         f"🔹 *Откуда:* {origin_with_flag}\n"
