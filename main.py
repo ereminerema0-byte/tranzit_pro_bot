@@ -13,7 +13,7 @@ from db import init_db, add_user, get_user_role, get_driver_id, get_logistician_
 import os
 
 # Bot configuration
-TOKEN = os.getenv("BOT_TOKEN", "8550944942:AAGD35GgkcQn_ys09huAKdlkJT2J4xs0HiA")
+TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@tranzitpro1")
 CONTACT_USERNAME = os.getenv("CONTACT_USERNAME", "@Oleg34381")
 
