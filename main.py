@@ -439,7 +439,7 @@ async def logistician_add_cargo_contact(message: types.Message, state: FSMContex
             f"🤖 @tranzit_pro_bot"
         )
     try:
-        await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
+        await bot.send_message(CHANNEL_ID, channel_message, parse_mode="HTML")
     except Exception as e:
         logging.error(f"Failed to publish to channel: {e}")
 
