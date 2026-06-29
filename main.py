@@ -605,6 +605,7 @@ async def confirm_single_msg_cargo(message: types.Message, state: FSMContext):
         add_cargo(logistician_id, c['origin'], c['destination'], c['cargo'], 0, 0, c['conditions'], "В описании", c['contact'])
         channel_message = format_cargo_message(c) + f"\n🤖 @tranzit_pro_bot"
         try:
+            logging.info(repr(channel_message))
             await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
         except Exception as e:
             logging.error(f"Failed to publish to channel: {e}")
