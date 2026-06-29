@@ -436,7 +436,7 @@ async def logistician_add_cargo_contact(message: types.Message, state: FSMContex
             f"💰 *Цена:* {price_display}\n"
             f"📅 *Дата готовности:* {user_data['date']}\n"
             f"📞 *Контакт:* {CONTACT_USERNAME}\n\n"
-            f"\n\n🤖 *Хотите быстро найти подходящий груз?*\nНапишите боту: @tranzit\\_pro\\_bot"
+            f"\n\n🤖 *Хотите быстро найти подходящий груз?*\nНапишите боту: @tranzit\_pro\_bot"
     
         )
     try:
