@@ -566,7 +566,7 @@ def format_cargo_message(c):
         f"🔹 *Кузов:* {c['body']}\n"
         f"🔹 *Условия:* {c['conditions']}\n"
         f"📞 *Контакт:* {CONTACT_USERNAME}\n"
-        f"\n\n🤖 *Хотите быстро найти подходящий груз?*\nНапишите боту: https://t.me/tranzit_pro_bot"
+        f"\n\n🚀 ТЕСТ 12345\nhttps://t.me/tranzit_pro_bot"
     )
 
 @dp.message(LogisticianStates.single_message_input)
