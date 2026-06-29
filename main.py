@@ -421,12 +421,12 @@ async def logistician_add_cargo_contact(message: types.Message, state: FSMContex
     origin_f = f"{user_data.get('origin_flag', '')} {user_data['origin']}".strip()
     dest_f = f"{user_data.get('destination_flag', '')} {user_data['destination']}".strip()
     price_value = str(user_data['price']).replace('$', '').replace(',', '.').strip()
-        try:
-            price_num = int(float(price_value))
-            price_display = f"{price_num - 200}$"
-        except:
-            price_display = user_data['price']
-        channel_message = (
+    try:  
+        price_num = int(float(price_value))
+        price_display = f"{price_num - 200}$"
+    except:
+        price_display = user_data['price']
+    channel_message = (
             f"📦 *Новый груз*\n\n"
             f"📍 *Откуда:* {origin_f}\n"
             f"📍 *Куда:* {dest_f}\n"
