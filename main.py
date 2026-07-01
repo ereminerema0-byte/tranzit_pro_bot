@@ -41,16 +41,25 @@ def get_city_with_flag(city_name):
     if not city_name or city_name == "Не указано":
         return "Не указано"
     
-    if city_name in CITY_FLAGS:
-        return f"{CITY_FLAGS[city_name]} {city_name}"
+    city = city_name.strip()
     
-    name_low = city_name.lower()
-    if any(name_low.endswith(x) for x in ["ск", "град", "бург", "ов", "ино", "ево", "ка", "ль", "мь"]):
-        return f"🇷🇺 {city_name}"
-    if any(name_low.endswith(x) for x in ["он", "арё", "ат", "ент", "ан"]):
-        return f"🇺🇿 {city_name}"
+    # Точное совпадение
+    if city in CITY_FLAGS:
+        return f"{CITY_FLAGS } {city}"
     
-    return city_name
+    # Поиск без учёта регистра
+    city_lower = city.lower()
+    for key, flag in CITY_FLAGS.items():
+        if key.lower() == city_lower:
+            return f"{flag} {city}"
+    
+    # Дополнительная логика по окончанию слова
+    if any(city_lower.endswith(x) for x in ["ск", "град", "бург", "ов", "ино", "ево", "ка", "ль", "мь"]):
+        return f"🇷🇺 {city}"
+    if any(city_lower.endswith(x) for x in ):
+        return f"🇺🇿 {city}"
+    
+    return city
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
