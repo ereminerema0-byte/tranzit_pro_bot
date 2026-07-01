@@ -497,7 +497,7 @@ def parse_cargo_block(text):
             price_match = re.search(r'(\d+)', price_raw)
         if price_match:
             price_num = int(price_match.group(1)) - 200
-            price = f"{price_num}$"  
+            price = f"{price_num}$"
         elif re.match(r'вес\s*:', low):
             weight = re.sub(r'вес\s*:\s*', '', line, flags=re.IGNORECASE).strip()
         elif re.match(r'(кузов|авто|фура)\s*:', low):
