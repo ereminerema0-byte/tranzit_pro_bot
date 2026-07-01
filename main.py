@@ -584,29 +584,39 @@ def format_cargo_message(c):
 
 @dp.message(LogisticianStates.single_message_input)
 async def process_single_message_cargo(message: types.Message, state: FSMContext):
-    blocks = [b.strip() for b in message.text.split('\n\n') if b.strip()]
+    text = message.text.strip()
+    blocks = [b.strip() for b in text.split('\n\n') if b.strip()]
+    
+    if not blocks:
+        await message.answer("Не удалось найти объявления. Попробуйте отправить ещё раз.")
+        return
+
     parsed_cargoes = []
     for block in blocks:
         parsed = parse_cargo_block(block)
-        if parsed: parsed_cargoes.append(parsed)
-            
+        if parsed:
+            parsed_cargoes.append(parsed)
+
     if not parsed_cargoes:
-        await message.answer("Не удалось распознать данные. Пожалуйста, проверьте формат и отправьте еще раз.")
+        await message.answer("Не удалось распознать данные. Попробуйте отправить в другом формате.")
         return
 
     await state.update_data(parsed_cargoes=parsed_cargoes)
+
     response_text = "📋 *Распознанные объявления:*\n\n"
     for i, c in enumerate(parsed_cargoes, 1):
-        response_text += f"--- Объявление #{i} ---\n{format_cargo_message(c)}\n"
-    response_text += "\nВсе верно? Каждое объявление будет опубликовано отдельно."
-    
+        response_text += f"--- Объявление #{i} ---\n{format_cargo_message(c)}\n\n"
+
+    response_text += "Все верно? Каждое объявление будет опубликовано отдельно."
+
     builder = ReplyKeyboardBuilder()
     builder.add(types.KeyboardButton(text="Да, всё верно"))
     builder.add(types.KeyboardButton(text="Нет, ввести заново"))
     builder.adjust(2)
-    
+
     await message.answer(response_text, reply_markup=builder.as_markup(resize_keyboard=True), parse_mode="Markdown")
     await state.set_state(LogisticianStates.confirming_cargo)
+
 
 @dp.message(LogisticianStates.confirming_cargo, F.text == "Да, всё верно")
 async def confirm_single_msg_cargo(message: types.Message, state: FSMContext):
@@ -618,7 +628,6 @@ async def confirm_single_msg_cargo(message: types.Message, state: FSMContext):
         add_cargo(logistician_id, c['origin'], c['destination'], c['cargo'], 0, 0, c['conditions'], "В описании", c['contact'])
         channel_message = format_cargo_message(c) + f"\n🤖 @tranzit_pro_bot"
         try:
-            logging.info(repr(channel_message))
             await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
         except Exception as e:
             logging.error(f"Failed to publish to channel: {e}")
