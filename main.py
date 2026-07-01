@@ -472,7 +472,6 @@ def parse_cargo_block(text):
         return None
 
     full_text = text.strip()
-    lines = [line.strip() for line in full_text.split('\n') if line.strip()]
     full_lower = full_text.lower()
 
     origin = "Не указано"
@@ -484,28 +483,19 @@ def parse_cargo_block(text):
     conditions = []
     contact = CONTACT_USERNAME
 
-    # === Флаги стран и города ===
-    flag_pattern = re.compile(r'[🇷🇺🇺🇿🇰🇿🇧🇾🇰🇬🇹🇯🇹🇲]')
+    # Откуда → Куда
+    route = re.search(r'([А-ЯЁA-Z][а-яёa-z\s-]+?)\s*[:\-→]\s*([А-ЯЁA-Z][а-яёa-z\s-]+)', full_text, re.IGNORECASE)
+    if route:
+        origin = route.group(1).strip()
+        destination = route.group(2).strip()
 
-    # Поиск маршрута с флагами
-    for line in lines:
-        if any(flag in line for flag in ['🇷🇺', '🇺🇿', '🇰🇿', '🇧🇾']):
-            # Убираем флаги для чистого города
-            clean_line = flag_pattern.sub('', line).strip()
-            if '→' in clean_line or '-' in clean_line or '–' in clean_line:
-                parts = re.split(r'[:→\-–]', clean_line)
-                if len(parts) >= 2:
-                    origin = parts[0].strip()
-                    destination = parts[-1].strip()
-                    break
-
-    # === Вес ===
+    # Вес
     w = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)\s*(т|тонн|тонна|тн)', full_lower)
     if w:
         weight = w.group(1) + " т"
 
-    # === Цена ===
-    p = re.search(r'(?:фрахт|цена|фрaхт|стоимость)[:\s]*(\d{3,5})', full_lower)
+    # Цена
+    p = re.search(r'(?:фрахт|цена|фрaхт)[:\s]*(\d{3,5})', full_lower)
     if p:
         price = p.group(1) + "$"
     else:
@@ -513,20 +503,19 @@ def parse_cargo_block(text):
         if p2:
             price = p2.group(1) + "$"
 
-    # === Кузов ===
+    # Кузов
     if re.search(r'тент|tent', full_lower):
         body = "Тент"
     elif re.search(r'реф|рефрижератор', full_lower):
         body = "Реф"
 
-    # === Груз ===
-    cargo_keywords = ['салафан', 'сахар', 'пиёз', 'текстиль', 'гилам', 'арбуз', 'апельсин', 'шина', 'салафан']
-    for word in cargo_keywords:
-        if word in full_lower:
-            cargo = word.capitalize()
-            break
+    # Груз
+    if 'салафан' in full_lower:
+        cargo = "Салафан"
+    elif 'сахар' in full_lower:
+        cargo = "Сахар"
 
-    # === Условия ===
+    # Условия
     if "аванс" in full_lower:
         conditions.append("Есть аванс")
     if "налич" in full_lower:
@@ -546,7 +535,7 @@ def parse_cargo_block(text):
         "price": price,
         "contact": contact
     }
-            
+                  
 def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c['origin'])
     dest_with_flag = get_city_with_flag(c['destination'])
