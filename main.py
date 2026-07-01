@@ -466,13 +466,14 @@ async def logistician_add_cargo_back(message: types.Message, state: FSMContext):
     await state.set_state(LogisticianStates.main_menu)
 
 import re
-        
+
 def parse_cargo_block(text):
     if not text or not text.strip():
         return None
 
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    full_lower = text.lower()
+    full_text = text.strip()
+    lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+    full_lower = full_text.lower()
 
     origin = "Не указано"
     destination = "Не указано"
@@ -481,89 +482,59 @@ def parse_cargo_block(text):
     body = "Не указано"
     price = "Не указано"
     conditions = []
+    contact = CONTACT_USERNAME
 
+    # === Флаги стран и города ===
+    flag_pattern = re.compile(r'[🇷🇺🇺🇿🇰🇿🇧🇾🇰🇬🇹🇯🇹🇲]')
+
+    # Поиск маршрута с флагами
     for line in lines:
-        low = line.lower()
-        # Убираем метки и берём значение
-        if re.match(r'откуда\s*:', low):
-            origin = re.sub(r'откуда\s*:\s*', '', line, flags=re.IGNORECASE).strip()
-        elif re.match(r'куда\s*:', low):
-            destination = re.sub(r'куда\s*:\s*', '', line, flags=re.IGNORECASE).strip()
-        elif re.match(r'груз\s*:', low):
-            cargo = re.sub(r'груз\s*:\s*', '', line, flags=re.IGNORECASE).strip()
-        # === Цена / Фрахт ===
-    price = "Не указано"
-    price_match = None
-    
-    if re.match(r'(фрахт|цена|ставка)\s*:', low):
-        price_raw = re.sub(r'(фрахт|цена|ставка)\s*:\s*', '', line, flags=re.IGNORECASE).strip()
-        price_match = re.search(r'(\d+)', price_raw)
-        
-    if price_match:
-        price_num = int(price_match.group(1)) - 200
-        price = f"{price_num}$"
+        if any(flag in line for flag in ['🇷🇺', '🇺🇿', '🇰🇿', '🇧🇾']):
+            # Убираем флаги для чистого города
+            clean_line = flag_pattern.sub('', line).strip()
+            if '→' in clean_line or '-' in clean_line or '–' in clean_line:
+                parts = re.split(r'[:→\-–]', clean_line)
+                if len(parts) >= 2:
+                    origin = parts[0].strip()
+                    destination = parts[-1].strip()
+                    break
+
+    # === Вес ===
+    w = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)\s*(т|тонн|тонна|тн)', full_lower)
+    if w:
+        weight = w.group(1) + " т"
+
+    # === Цена ===
+    p = re.search(r'(?:фрахт|цена|фрaхт|стоимость)[:\s]*(\d{3,5})', full_lower)
+    if p:
+        price = p.group(1) + "$"
     else:
-        # Дополнительный поиск просто числа с $
-        price_match2 = re.search(r'(\d{3,5})\s*\$', full_lower)
-        if price_match2:
-            price = price_match2.group(1) + "$"
-        elif re.match(r'вес\s*:', low):
-            weight = re.sub(r'вес\s*:\s*', '', line, flags=re.IGNORECASE).strip()
-        elif re.match(r'(кузов|авто|фура)\s*:', low):
-            body_raw = re.sub(r'(кузов|авто|фура)\s*:\s*', '', line, flags=re.IGNORECASE).strip()
-            if re.search(r'тент', body_raw, re.IGNORECASE):
-                body = "Тент"
-            elif re.search(r'реф', body_raw, re.IGNORECASE):
-                body = "Реф"
-            else:
-                body = body_raw
-        elif re.match(r'оплата\s*:', low):
-            cond = re.sub(r'оплата\s*:\s*', '', line, flags=re.IGNORECASE).strip()
-            conditions.append(cond)
+        p2 = re.search(r'(\d{3,5})\s*\$', full_lower)
+        if p2:
+            price = p2.group(1) + "$"
 
-    # Если метки не найдены — пробуем тильду
-    if origin == "Не указано" and '~' in text:
-        parts = text.split('~', 1)
-        left = re.sub(r'^\d{1,2}\.\d{1,2}\.\d{2,4}[гГ]?\.\s*', '', parts[0]).strip()
-        origin = re.sub(r'[🇷🇺🇺🇿🇰🇿🇧🇾🇰🇬🇹🇯🇹🇲]', '', left).strip()
-        right = parts[1].strip()
-        dest_words = right.split()
-        dest = []
-        for w in dest_words:
-            if re.match(r'^[А-ЯЁA-Z]', w):
-                dest.append(w)
-            else:
-                break
-        destination = ' '.join(dest) if dest else "Не указано"
+    # === Кузов ===
+    if re.search(r'тент|tent', full_lower):
+        body = "Тент"
+    elif re.search(r'реф|рефрижератор', full_lower):
+        body = "Реф"
 
-    # Флаги построчно
-    if origin == "Не указано":
-        flag_pattern = re.compile(r'[🇷🇺🇺🇿🇰🇿🇧🇾🇰🇬🇹🇯🇹🇲]')
-        origins = []
-        destinations = []
-        for line in lines:
-            if re.search(r'\d{7,}', line.replace(' ', '')):
-                continue
-            if any(x in line.upper() for x in ['МАХ', 'ТГ', 'ИМО', 'ВАТСАП']):
-                continue
-            if '🇷🇺' in line or '🇧🇾' in line or '🇰🇿' in line:
-                city = flag_pattern.sub('', line).strip()
-                if city:
-                    origins.append(city)
-            elif '🇺🇿' in line:
-                city = flag_pattern.sub('', line).strip()
-                if city:
-                    destinations.append(city)
-        if origins:
-            origin = ', '.join(origins)
-        if destinations:
-            destination = ', '.join(destinations)
+    # === Груз ===
+    cargo_keywords = ['салафан', 'сахар', 'пиёз', 'текстиль', 'гилам', 'арбуз', 'апельсин', 'шина', 'салафан']
+    for word in cargo_keywords:
+        if word in full_lower:
+            cargo = word.capitalize()
+            break
 
-        if "аванс" in full_lower:
-            conditions.append("Есть аванс")
-        
-        if "срочно" in full_lower:
-            conditions.append("Срочно")
+    # === Условия ===
+    if "аванс" in full_lower:
+        conditions.append("Есть аванс")
+    if "налич" in full_lower:
+        conditions.append("Наличные")
+    if "срочно" in full_lower:
+        conditions.append("Срочно")
+
+    conditions_str = ", ".join(conditions) if conditions else "Не указано"
 
     return {
         "origin": origin,
@@ -571,11 +542,11 @@ def parse_cargo_block(text):
         "cargo": cargo,
         "weight_str": weight,
         "body": body,
-        "conditions": ', '.join(conditions) if conditions else "Не указано",
+        "conditions": conditions_str,
         "price": price,
-        "contact": CONTACT_USERNAME
+        "contact": contact
     }
-
+            
 def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c['origin'])
     dest_with_flag = get_city_with_flag(c['destination'])
