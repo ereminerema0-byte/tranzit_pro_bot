@@ -556,7 +556,7 @@ def format_cargo_message(c):
         final_price = max(price_num - 200, 0)
         price_text = f"{final_price}$"
     except:
-        price_text = c return (
+        price_text = c
         f"📦 *Новое объявление о грузе:*\n\n"
         f"🔹 *Откуда:* {origin_with_flag}\n"
         f"🔹 *Куда:* {dest_with_flag}\n"
