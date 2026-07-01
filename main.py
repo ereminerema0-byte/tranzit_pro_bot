@@ -483,11 +483,18 @@ def parse_cargo_block(text):
     conditions = []
     contact = CONTACT_USERNAME
 
-    # Откуда → Куда
-    route = re.search(r'([А-ЯЁA-Z][а-яёa-z\s-]+?)\s*[:\-→]\s*([А-ЯЁA-Z][а-яёa-z\s-]+)', full_text, re.IGNORECASE)
+    # Откуда и Куда
+    route = re.search(r'откуда\s*:\s*(  +?)\s*куда\s*:\s*(  +)', full_text, re.IGNORECASE)
     if route:
         origin = route.group(1).strip()
         destination = route.group(2).strip()
+
+    # Запасной вариант поиска маршрута
+    if origin == "Не указано":
+        alt_route = re.search(r'( [а-яёa-z\s- :\-→]\s*(  +)', full_text, re.IGNORECASE)
+        if alt_route:
+            origin = alt_route.group(1).strip()
+            destination = alt_route.group(2).strip()
 
     # Вес
     w = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)\s*(т|тонн|тонна|тн)', full_lower)
@@ -495,7 +502,7 @@ def parse_cargo_block(text):
         weight = w.group(1) + " т"
 
     # Цена
-    p = re.search(r'(?:фрахт|цена|фрaхт)[:\s]*(\d{3,5})', full_lower)
+    p = re.search(r'(?:фрахт|цена|фрaхт|стоимость) *(\d{3,5})', full_lower)
     if p:
         price = p.group(1) + "$"
     else:
@@ -504,16 +511,14 @@ def parse_cargo_block(text):
             price = p2.group(1) + "$"
 
     # Кузов
-    if re.search(r'тент|tent', full_lower):
+    if "тент" in full_lower:
         body = "Тент"
-    elif re.search(r'реф|рефрижератор', full_lower):
+    elif "реф" in full_lower:
         body = "Реф"
 
     # Груз
-    if 'салафан' in full_lower:
+    if "салафан" in full_lower:
         cargo = "Салафан"
-    elif 'сахар' in full_lower:
-        cargo = "Сахар"
 
     # Условия
     if "аванс" in full_lower:
