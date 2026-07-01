@@ -41,11 +41,11 @@ def get_city_with_flag(city_name):
     if not city_name or city_name == "Не указано":
         return "Не указано"
     
+    # Основной поиск по словарю
     if city_name in CITY_FLAGS:
-        return f"{CITY_FLAGS } {city_name}"
+        return f"{CITY_FLAGS[city_name]} {city_name}"
     
-    return city_name
-    
+    # Дополнительная логика по окончанию слова
     name_low = city_name.lower()
     if any(name_low.endswith(x) for x in ["ск", "град", "бург", "ов", "ино", "ево", "ка", "ль", "мь"]):
         return f"🇷🇺 {city_name}"
