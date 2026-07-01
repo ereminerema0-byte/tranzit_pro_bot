@@ -41,11 +41,9 @@ def get_city_with_flag(city_name):
     if not city_name or city_name == "Не указано":
         return "Не указано"
     
-    # Основной поиск по словарю
     if city_name in CITY_FLAGS:
         return f"{CITY_FLAGS[city_name]} {city_name}"
     
-    # Дополнительная логика по окончанию слова
     name_low = city_name.lower()
     if any(name_low.endswith(x) for x in ["ск", "град", "бург", "ов", "ино", "ево", "ка", "ль", "мь"]):
         return f"🇷🇺 {city_name}"
@@ -552,11 +550,11 @@ def parse_cargo_block(text):
                   
 def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c['origin'])
-    dest_with_flag = get_city_with_flag(c )
+    dest_with_flag = get_city_with_flag(c['destination'])
     
     # Отнимаем 200$ от фрахта
     try:
-        price_num = int(''.join(filter(str.isdigit, str(c ))))
+        price_num = int(''.join(filter(str.isdigit, str(c.get('price', 0)))))
         final_price = max(price_num - 200, 0)
         price_text = f"{final_price}$"
     except:
@@ -566,11 +564,11 @@ def format_cargo_message(c):
         f"📦 *Новое объявление о грузе:*\n\n"
         f"🔹 *Откуда:* {origin_with_flag}\n"
         f"🔹 *Куда:* {dest_with_flag}\n"
-        f"🔹 *Груз:* {c }\n"
-        f"🔹 *Вес:* {c }\n"
-        f"🔹 *Кузов:* {c }\n"
+        f"🔹 *Груз:* {c.get('cargo', 'Не указано')}\n"
+        f"🔹 *Вес:* {c.get('weight_str', 'Не указано')}\n"
+        f"🔹 *Кузов:* {c.get('body', 'Не указано')}\n"
         f"💰 *Фрахт:* {price_text}\n"
-        f"🔹 *Условия:* {c }\n\n"
+        f"🔹 *Условия:* {c.get('conditions', 'Не указано')}\n\n"
         f"📞 *Контакт:* {c.get('contact', CONTACT_USERNAME)}\n"
         f"\n\n🤖 *Хотите быстро найти подходящий груз?*\nНапишите боту: @tranzit\\_pro\\_bot"
     )
