@@ -550,11 +550,11 @@ def parse_cargo_block(text):
         if destinations:
             destination = ', '.join(destinations)
 
-    if "аванс" in full_lower:
-    conditions.append("Есть аванс")
+        if "аванс" in full_lower:
+            conditions.append("Есть аванс")
         
-    if "срочно" in full_lower:
-        conditions.append("Срочно")
+        if "срочно" in full_lower:
+            conditions.append("Срочно")
 
     return {
         "origin": origin,
