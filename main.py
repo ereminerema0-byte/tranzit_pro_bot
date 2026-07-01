@@ -547,16 +547,18 @@ def parse_cargo_block(text):
     }
                   
 def format_cargo_message(c):
-    origin_with_flag = get_city_with_flag(c )
-    dest_with_flag = get_city_with_flag(c['destination'])
+    origin_with_flag = get_city_with_flag(c['origin'])
+    dest_with_flag = get_city_with_flag(c )
     
-    # Отнимаем 200$ от фрахта
+    # Отнимаем 200$ от указанной цены
     try:
         price_num = int(''.join(filter(str.isdigit, str(c ))))
         final_price = max(price_num - 200, 0)
         price_text = f"{final_price}$"
     except:
-        price_text = c
+        price_text = c.get('price', "Не указано")
+
+    return (
         f"📦 *Новое объявление о грузе:*\n\n"
         f"🔹 *Откуда:* {origin_with_flag}\n"
         f"🔹 *Куда:* {dest_with_flag}\n"
