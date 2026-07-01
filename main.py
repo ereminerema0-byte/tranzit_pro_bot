@@ -492,11 +492,11 @@ def parse_cargo_block(text):
         elif re.match(r'груз\s*:', low):
             cargo = re.sub(r'груз\s*:\s*', '', line, flags=re.IGNORECASE).strip()
         elif re.match(r'(фрахт|цена|ставка)\s*:', low):
-            price_raw = re.sub(r'(фрахт|цена|ставка)\s*:\s*', '', line, flags=re.IGNORECASE).strip()
-            price_match = re.search(r'(\d+)', price_raw)
-            if price_match:
-                price_num = int(price_match.group(1)) - 200
-                price = f"{price_num}$"
+    price_raw = re.sub(r'(фрахт|цена|ставка)\s*:\s*', '', line, flags=re.IGNORECASE).strip()
+    price_match = re.search(r'(\d+)', price_raw)
+    if price_match:
+        price_num = int(price_match.group(1)) - 200
+        price = f"{price_num}$"
         elif re.match(r'вес\s*:', low):
             weight = re.sub(r'вес\s*:\s*', '', line, flags=re.IGNORECASE).strip()
         elif re.match(r'(кузов|авто|фура)\s*:', low):
@@ -550,7 +550,8 @@ def parse_cargo_block(text):
             destination = ', '.join(destinations)
 
     if "аванс" in full_lower:
-        conditions.append("Есть аванс")
+    conditions.append("Есть аванс")
+        
     if "срочно" in full_lower:
         conditions.append("Срочно")
 
