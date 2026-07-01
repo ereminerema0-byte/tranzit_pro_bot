@@ -552,9 +552,9 @@ def parse_cargo_block(text):
                   
 def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c['origin'])
-    dest_with_flag = get_city_with_flag(c['destination'])
+    dest_with_flag = get_city_with_flag(c )
     
-    # Отнимаем 200$ от указанной цены
+    # Отнимаем 200$ от фрахта
     try:
         price_num = int(''.join(filter(str.isdigit, str(c ))))
         final_price = max(price_num - 200, 0)
