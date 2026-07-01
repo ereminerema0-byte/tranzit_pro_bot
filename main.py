@@ -549,6 +549,7 @@ def parse_cargo_block(text):
 def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c['origin'])
     dest_with_flag = get_city_with_flag(c['destination'])
+    
     return (
         f"📦 *Новое объявление о грузе:*\n\n"
         f"🔹 *Откуда:* {origin_with_flag}\n"
@@ -556,9 +557,10 @@ def format_cargo_message(c):
         f"🔹 *Груз:* {c['cargo']}\n"
         f"🔹 *Вес:* {c['weight_str']}\n"
         f"🔹 *Кузов:* {c['body']}\n"
-        f"🔹 *Условия:* {c['conditions']}\n"
-        f"📞 *Контакт:* {CONTACT_USERNAME}\n"
-        f"\n\n🤖 *Хотите быстро найти подходящий груз?*\nНапишите боту: @tranzit\\_pro\\_bot"
+        f"💰 *Фрахт:* {c['price']}\n"
+        f"🔹 *Условия:* {c['conditions']}\n\n"
+        f"📞 *Контакт:* {c.get('contact', CONTACT_USERNAME)}\n"
+        f"\n\n🤖 *Хотите быстро найти подходящий груз?*\nНапишите боту: @tranzit_pro_bot"
     )
 
 @dp.message(LogisticianStates.single_message_input)
