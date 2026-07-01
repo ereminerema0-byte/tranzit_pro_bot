@@ -38,9 +38,13 @@ CITY_FLAGS = {
 }
 
 def get_city_with_flag(city_name):
-    if not city_name: return "Не указано"
+    if not city_name or city_name == "Не указано":
+        return "Не указано"
+    
     if city_name in CITY_FLAGS:
-        return f"{CITY_FLAGS[city_name]} {city_name}"
+        return f"{CITY_FLAGS } {city_name}"
+    
+    return city_name
     
     name_low = city_name.lower()
     if any(name_low.endswith(x) for x in ["ск", "град", "бург", "ов", "ино", "ево", "ка", "ль", "мь"]):
@@ -594,8 +598,7 @@ async def process_single_message_cargo(message: types.Message, state: FSMContext
 
     response_text = "📋 *Распознанные объявления:*\n\n"
     for i, c in enumerate(parsed_cargoes, 1):
-        response_text += f"--- Объявление #{i} ---\n{format_cargo_message(c)}\n\n"
-
+        response_text += f"--- Объявление #{i+1} ---\n{format_cargo_message(c)}\n\n"
     response_text += "Все верно? Каждое объявление будет опубликовано отдельно."
 
     builder = ReplyKeyboardBuilder()
