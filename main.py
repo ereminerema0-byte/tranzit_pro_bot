@@ -495,10 +495,15 @@ def parse_cargo_block(text):
     if w:
         weight = w.group(1) + " т"
 
-    # === Цена / Фрахт ===
-    price_match = re.search(r'(?:фрахт|цена|фрaхт|стоимость)[:\s]*(\d{1,5})', full_lower)
+    # === Цена / Фрахт (улучшенный поиск) ===
+    price_match = re.search(r'(?:фрахт|цена|фрaхт|стоимость|фрах)[:\s]*(\d{1,5})', full_lower)
     if price_match:
         price = price_match.group(1) + "$"
+    else:
+        # Дополнительный поиск просто числа с $
+        price_match2 = re.search(r'(\d{3,5})\s*\$', full_lower)
+        if price_match2:
+            price = price_match2.group(1) + "$"
 
     # === Кузов ===
     if re.search(r'тент|tent', full_lower):
@@ -507,8 +512,8 @@ def parse_cargo_block(text):
         body = "Реф"
 
     # === Груз ===
-    cargo_words = ['салафан', 'сахар', 'пиёз', 'текстиль', 'гилам', 'арбуз', 'апельсин', 'шина']
-    for word in cargo_words:
+    cargo_keywords = ['салафан', 'сахар', 'пиёз', 'текстиль', 'гилам', 'арбуз', 'апельсин', 'шина']
+    for word in cargo_keywords:
         if word in full_lower:
             cargo = word.capitalize()
             break
@@ -533,7 +538,7 @@ def parse_cargo_block(text):
         "price": price,
         "contact": contact
     }
-                      
+                             
 def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c['origin'])
     dest_with_flag = get_city_with_flag(c['destination'])
