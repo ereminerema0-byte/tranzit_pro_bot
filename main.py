@@ -480,48 +480,44 @@ def parse_cargo_block(text):
     cargo = "Не указано"
     weight = "Не указано"
     body = "Не указано"
+    price = "Не указано"
     conditions = []
     contact = CONTACT_USERNAME
 
-    # === 1. Поиск Откуда → Куда ===
-    # Самые частые форматы
-    route_match = re.search(r'(?:откуда|из|от)\s*[:\-→]?\s*([А-ЯЁA-Z][а-яёa-z\s-]+?)\s*[:\-→]\s*([А-ЯЁA-Z][а-яёa-z\s-]+)', full_text, re.IGNORECASE)
-    if route_match:
-        origin = route_match.group(1).strip()
-        destination = route_match.group(2).strip()
-    else:
-        # Альтернативный поиск
-        for line in lines:
-            if any(x in line for x in ['→', '→', '-', '—']) and len(line) < 100:
-                parts = re.split(r'[:\-→—]', line)
-                if len(parts) >= 2:
-                    origin = parts[0].strip()
-                    destination = parts[-1].strip()
-                    break
+    # === Откуда → Куда ===
+    route = re.search(r'(?:откуда|из|от)?\s*[:\-→]?\s*([А-ЯЁA-Z][а-яёa-z\s-]+?)\s*[:\-→]\s*([А-ЯЁA-Z][а-яёa-z\s-]+)', full_text, re.IGNORECASE)
+    if route:
+        origin = route.group(1).strip()
+        destination = route.group(2).strip()
 
-    # === 2. Вес ===
-    weight_match = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)\s*(т|тонн|тонна|тн)', full_lower)
-    if weight_match:
-        weight = weight_match.group(1) + " т"
+    # === Вес ===
+    w = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)\s*(т|тонн|тонна|тн)', full_lower)
+    if w:
+        weight = w.group(1) + " т"
 
-    # === 3. Кузов ===
+    # === Цена / Фрахт ===
+    price_match = re.search(r'(?:фрахт|цена|фрaхт|стоимость)[:\s]*(\d{1,5})', full_lower)
+    if price_match:
+        price = price_match.group(1) + "$"
+
+    # === Кузов ===
     if re.search(r'тент|tent', full_lower):
         body = "Тент"
     elif re.search(r'реф|рефрижератор', full_lower):
         body = "Реф"
-    elif re.search(r'фургон|изотерма', full_lower):
-        body = "Фургон"
 
-    # === 4. Груз ===
-    cargo_keywords = ['салафан', 'сахар', 'пиёз', 'текстиль', 'гилам', 'арбуз', 'апельсин', 'cola', 'mdf', 'шина']
-    for word in cargo_keywords:
+    # === Груз ===
+    cargo_words = ['салафан', 'сахар', 'пиёз', 'текстиль', 'гилам', 'арбуз', 'апельсин', 'шина']
+    for word in cargo_words:
         if word in full_lower:
             cargo = word.capitalize()
             break
 
-    # === 5. Условия ===
-    if "аванс" in full_lower or "налич" in full_lower:
-        conditions.append("Есть аванс / Наличные")
+    # === Условия ===
+    if "аванс" in full_lower:
+        conditions.append("Есть аванс")
+    if "налич" in full_lower:
+        conditions.append("Наличные")
     if "срочно" in full_lower:
         conditions.append("Срочно")
 
@@ -534,9 +530,10 @@ def parse_cargo_block(text):
         "weight_str": weight,
         "body": body,
         "conditions": conditions_str,
+        "price": price,
         "contact": contact
     }
-                   
+                      
 def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c['origin'])
     dest_with_flag = get_city_with_flag(c['destination'])
