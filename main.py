@@ -473,7 +473,8 @@ def parse_cargo_block(text):
     
     full_text = text.strip()
     lines = [line.strip() for line in full_text.split('\n') if line.strip()]
-    
+    full_lower = full_text.lower()
+
     origin = "Не указано"
     destination = "Не указано"
     cargo = "Не указано"
@@ -482,48 +483,47 @@ def parse_cargo_block(text):
     conditions = []
     contact = CONTACT_USERNAME
 
-    # Объединяем текст для поиска
-    full = ' '.join(lines).lower()
-
-    # === Поиск городов (откуда → куда) ===
-    city_pattern = re.compile(r'([А-ЯЁA-Z][а-яёa-z0-9\s-]+?)\s*[→\-–—]\s*([А-ЯЁA-Z][а-яёa-z0-9\s-]+)', re.IGNORECASE)
-    cities = city_pattern.findall(full_text)
-    if cities:
-        origin = cities[0][0].strip()
-        destination = cities[0][1].strip()
+    # === 1. Поиск Откуда → Куда ===
+    # Самые частые форматы
+    route_match = re.search(r'(?:откуда|из|от)\s*[:\-→]?\s*([А-ЯЁA-Z][а-яёa-z\s-]+?)\s*[:\-→]\s*([А-ЯЁA-Z][а-яёa-z\s-]+)', full_text, re.IGNORECASE)
+    if route_match:
+        origin = route_match.group(1).strip()
+        destination = route_match.group(2).strip()
     else:
         # Альтернативный поиск
         for line in lines:
-            if '→' in line or '-' in line or '–' in line:
-                parts = re.split(r'[→\-–—]', line)
+            if any(x in line for x in ['→', '→', '-', '—']) and len(line) < 100:
+                parts = re.split(r'[:\-→—]', line)
                 if len(parts) >= 2:
                     origin = parts[0].strip()
-                    destination = parts[1].strip()
+                    destination = parts[-1].strip()
                     break
 
-    # === Вес ===
-    weight_match = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)\s*(т|тонн|тонна|тн)', full, re.IGNORECASE)
+    # === 2. Вес ===
+    weight_match = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)\s*(т|тонн|тонна|тн)', full_lower)
     if weight_match:
         weight = weight_match.group(1) + " т"
 
-    # === Тип кузова ===
-    if re.search(r'тент|tent', full, re.IGNORECASE):
+    # === 3. Кузов ===
+    if re.search(r'тент|tent', full_lower):
         body = "Тент"
-    elif re.search(r'реф|рефрижератор', full, re.IGNORECASE):
+    elif re.search(r'реф|рефрижератор', full_lower):
         body = "Реф"
-    elif re.search(r'фургон|изотерма', full, re.IGNORECASE):
+    elif re.search(r'фургон|изотерма', full_lower):
         body = "Фургон"
 
-    # === Груз ===
-    cargo_keywords = ['сахар', 'пиёз', 'салафан', 'текстиль', 'гилам', 'арбуз', 'апельсин', 'cola', 'mdf']
+    # === 4. Груз ===
+    cargo_keywords = ['салафан', 'сахар', 'пиёз', 'текстиль', 'гилам', 'арбуз', 'апельсин', 'cola', 'mdf', 'шина']
     for word in cargo_keywords:
-        if word in full:
+        if word in full_lower:
             cargo = word.capitalize()
             break
 
-    # === Условия ===
-    if "аванс" in full or "нал" in full or "перечисление" in full:
+    # === 5. Условия ===
+    if "аванс" in full_lower or "налич" in full_lower:
         conditions.append("Есть аванс / Наличные")
+    if "срочно" in full_lower:
+        conditions.append("Срочно")
 
     conditions_str = ", ".join(conditions) if conditions else "Не указано"
 
@@ -536,7 +536,7 @@ def parse_cargo_block(text):
         "conditions": conditions_str,
         "contact": contact
     }
-           
+                   
 def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c['origin'])
     dest_with_flag = get_city_with_flag(c['destination'])
