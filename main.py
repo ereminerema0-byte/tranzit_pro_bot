@@ -491,7 +491,7 @@ def parse_cargo_block(text):
 
     # Запасной вариант поиска маршрута
     if origin == "Не указано":
-        alt_route = re.search(r'( [а-яёa-z\s- :\-→]\s*(  +)', full_text, re.IGNORECASE)
+        alt_route = re.search(r'([А-ЯЁA-Z][а-яёa-z\s-]+?)\s*[:\-→]\s*([А-ЯЁA-Z][а-яёa-z\s-]+)', full_text, re.IGNORECASE)
         if alt_route:
             origin = alt_route.group(1).strip()
             destination = alt_route.group(2).strip()
