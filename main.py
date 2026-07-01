@@ -483,8 +483,11 @@ def parse_cargo_block(text):
     conditions = []
     contact = CONTACT_USERNAME
 
-    # Откуда → Куда
-    route = re.search(r'откуда\s*[:\- :\-]?\s*( +)', full_text, re.IGNORECASE)
+    # Откуда и Куда
+    route = re.search(r'Откуда\s*:\s*(.+?)\s*Куда\s*:\s*(.+)', full_text, re.IGNORECASE)
+    if route:
+        origin = route.group(1).strip()
+        destination = route.group(2).strip()
     if not route:
         route = re.search(r'( +?)\s*[:\-→]\s*( +)', full_text, re.IGNORECASE)
     if route:
