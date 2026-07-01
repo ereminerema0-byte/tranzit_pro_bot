@@ -491,13 +491,22 @@ def parse_cargo_block(text):
             destination = re.sub(r'куда\s*:\s*', '', line, flags=re.IGNORECASE).strip()
         elif re.match(r'груз\s*:', low):
             cargo = re.sub(r'груз\s*:\s*', '', line, flags=re.IGNORECASE).strip()
+        # === Цена / Фрахт ===
+    price = "Не указано"
+    price_match = None
+    
+    if re.match(r'(фрахт|цена|ставка)\s*:', low):
+        price_raw = re.sub(r'(фрахт|цена|ставка)\s*:\s*', '', line, flags=re.IGNORECASE).strip()
+        price_match = re.search(r'(\d+)', price_raw)
         
-        elif re.match(r'(фрахт|цена|ставка)\s*:', low):
-            price_raw = re.sub(r'(фрахт|цена|ставка)\s*:\s*', '', line, flags=re.IGNORECASE).strip()
-            price_match = re.search(r'(\d+)', price_raw)
-        if price_match:
-            price_num = int(price_match.group(1)) - 200
-            price = f"{price_num}$"
+    if price_match:
+        price_num = int(price_match.group(1)) - 200
+        price = f"{price_num}$"
+    else:
+        # Дополнительный поиск просто числа с $
+        price_match2 = re.search(r'(\d{3,5})\s*\$', full_lower)
+        if price_match2:
+            price = price_match2.group(1) + "$"
         elif re.match(r'вес\s*:', low):
             weight = re.sub(r'вес\s*:\s*', '', line, flags=re.IGNORECASE).strip()
         elif re.match(r'(кузов|авто|фура)\s*:', low):
