@@ -555,10 +555,16 @@ def parse_cargo_block(text):
     # Условия
     if "аванс" in full_lower:
         conditions.append("Есть аванс")
-    if "налич" in full_lower:
+    if "налич" in full_lower or "нал" in full_lower:
         conditions.append("Наличные")
+    if "безнал" in full_lower or "без нал" in full_lower:
+        conditions.append("Безнал")
+    if "карт" in full_lower:
+        conditions.append("Карта")
     if "срочно" in full_lower:
         conditions.append("Срочно")
+    if "комбо" in full_lower or "ком" in full_lower:
+        conditions.append("Комбо")
 
     conditions_str = ", ".join(conditions) if conditions else "Не указано"
 
