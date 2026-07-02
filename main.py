@@ -322,7 +322,7 @@ async def view_my_ads_router(message: types.Message, state: FSMContext):
         if vehicles:
             response = "Ваши объявления о машинах:\n"
             for vehicle in vehicles:
-                response += f"\nТип кузова: {vehicle[2]}\nГрузоподъёмность: {vehicle[3]} т\nОткуда: {vehicle[4 5 6]}\nКонтакт: {vehicle[7]}\n---"
+                response += f"\nТип кузова: {vehicle[2 3]} т\nОткуда: {vehicle[4 5 6]}\nКонтакт: {vehicle[7]}\n---"
         else:
             response = "У вас пока нет размещенных объявлений о машинах."
         await message.answer(response, reply_markup=get_driver_main_keyboard())
