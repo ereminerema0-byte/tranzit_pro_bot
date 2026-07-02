@@ -554,19 +554,35 @@ def parse_cargo_block(text):
 
     # Условия
     conditions = []
+    full_lower = full_text.lower()
     
-    if "аванс" in full_lower:
+    has_nal = "нал" in full_lower and "безнал" not in full_lower
+    has_beznal = "безнал" in full_lower or "без нал" in full_lower
+    has_avans = "аванс" in full_lower
+    has_srochno = "срочно" in full_lower
+    has_karta = "карт" in full_lower
+    has_kombo = "комбо" in full_lower or "ком" in full_lower and "комбо" not in full_lower
+
+    if has_avans:
         conditions.append("Аванс")
-    if "налич" in full_lower or "нал" in full_lower:
+    if has_nal:
         conditions.append("Наличные")
-    if "безнал" in full_lower or "без нал" in full_lower:
+    if has_beznal:
         conditions.append("Безнал")
-    if "карт" in full_lower:
+    if has_karta:
         conditions.append("Карта")
-    if "срочно" in full_lower:
+    if has_srochno:
         conditions.append("Срочно")
-    if "комбо" in full_lower or "ком" in full_lower:
+    if has_kombo:
         conditions.append("Комбо")
+
+    # Объединяем Безнал + Аванс
+    if "Безнал" in conditions and "Аванс" in conditions:
+        conditions.remove("Безнал")
+        conditions.remove("Аванс")
+        conditions.append("Безнал + Аванс")
+
+    conditions_str = ", ".join(conditions) if conditions else "Не указано"
 
     # Объединяем "Безнал + Аванс" если оба есть
     if "Безнал" in conditions and "Аванс" in conditions:
