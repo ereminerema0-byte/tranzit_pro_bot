@@ -641,12 +641,12 @@ async def confirm_single_msg_cargo(message: types.Message, state: FSMContext):
     for c in parsed_cargoes:
         add_cargo(
             logistician_id, 
-            c , 
-            c , 
-            c , 
-            c.get('weight_str', 0),           # Вес
-            0,                                # Объём
-            c.get('price', 'Не указано'),     # Цена
+            c['origin'], 
+            c['destination'], 
+            c['cargo'], 
+            c.get('weight_str', 0), 
+            0, 
+            c.get('price', 'Не указано'), 
             "В описании", 
             c.get('contact', CONTACT_USERNAME)
         )
