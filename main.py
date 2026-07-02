@@ -122,7 +122,8 @@ def get_driver_main_keyboard():
     builder.add(types.KeyboardButton(text="🔔 Подписка на направления"))
     builder.add(types.KeyboardButton(text="🚚 Разместить свободную машину"))
     builder.add(types.KeyboardButton(text="📋 Мои объявления"))
-    builder.adjust(2)
+    builder.add(types.KeyboardButton(text="🔄 Сменить роль"))
+    builder.adjust(2, 2, 1)
     return builder.as_markup(resize_keyboard=True)
 
 def get_logistician_main_keyboard():
@@ -131,7 +132,8 @@ def get_logistician_main_keyboard():
     builder.add(types.KeyboardButton(text="🔍 Найти груз"))
     builder.add(types.KeyboardButton(text="🚛 Найти свободные машины"))
     builder.add(types.KeyboardButton(text="📋 Мои объявления"))
-    builder.adjust(2)
+    builder.add(types.KeyboardButton(text="🔄 Сменить роль"))
+    builder.adjust(2, 2, 1)
     return builder.as_markup(resize_keyboard=True)
 
 def get_country_keyboard():
@@ -320,7 +322,7 @@ async def view_my_ads_router(message: types.Message, state: FSMContext):
         if vehicles:
             response = "Ваши объявления о машинах:\n"
             for vehicle in vehicles:
-                response += f"\nТип кузова: {vehicle[2]}\nГрузоподъёмность: {vehicle[3]} т\nОткуда: {vehicle[4]}\nКуда: {vehicle[5]}\nДата: {vehicle[6]}\nКонтакт: {vehicle[7]}\n---"
+                response += f"\nТип кузова: {vehicle[2 3]} т\nОткуда: {vehicle[4 5 6]}\nКонтакт: {vehicle[7]}\n---"
         else:
             response = "У вас пока нет размещенных объявлений о машинах."
         await message.answer(response, reply_markup=get_driver_main_keyboard())
@@ -331,12 +333,17 @@ async def view_my_ads_router(message: types.Message, state: FSMContext):
         if cargo_list:
             response = "Ваши объявления о грузах:\n"
             for cargo in cargo_list:
-                response += f"\nОткуда: {cargo[2]}\nКуда: {cargo[3]}\nТип: {cargo[4]}\nВес: {cargo[5]} кг\nОбъем: {cargo[6]} м³\nЦена: {cargo[7]}\nДата: {cargo[8]}\nКонтакт: {cargo[9]}\n---"
+                response += f"\nОткуда: {cargo[2 3 4]}\nВес: {cargo[5 6]} м³\nЦена: {cargo[7 8 9]}\n---"
         else:
             response = "У вас пока нет размещенных объявлений о грузах."
         await message.answer(response, reply_markup=get_logistician_main_keyboard())
         await state.set_state(LogisticianStates.main_menu)
 
+
+@dp.message(F.text == "🔄 Сменить роль")
+async def change_role(message: types.Message, state: FSMContext):
+    await message.answer("Выберите новую роль:", reply_markup=get_role_keyboard())
+    await state.set_state(UserRole.choosing_role)
 # --- Logistician Handlers ---
 
 @dp.message(F.text == "📦 Разместить груз")
