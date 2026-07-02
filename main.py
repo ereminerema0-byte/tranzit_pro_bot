@@ -1,4 +1,4 @@
-Жюри import asyncio
+import asyncio
 import logging
 import re
 from aiogram import Bot, Dispatcher, types, F
