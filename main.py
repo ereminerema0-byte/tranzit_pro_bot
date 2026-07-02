@@ -553,8 +553,10 @@ def parse_cargo_block(text):
         cargo = "Помидоры"
 
     # Условия
+    conditions = []
+    
     if "аванс" in full_lower:
-        conditions.append("Есть аванс")
+        conditions.append("Аванс")
     if "налич" in full_lower or "нал" in full_lower:
         conditions.append("Наличные")
     if "безнал" in full_lower or "без нал" in full_lower:
@@ -565,6 +567,14 @@ def parse_cargo_block(text):
         conditions.append("Срочно")
     if "комбо" in full_lower or "ком" in full_lower:
         conditions.append("Комбо")
+
+    # Объединяем "Безнал + Аванс" если оба есть
+    if "Безнал" in conditions and "Аванс" in conditions:
+        conditions.remove("Безнал")
+        conditions.remove("Аванс")
+        conditions.append("Безнал + Аванс")
+
+    conditions_str = ", ".join(conditions) if conditions else "Не указано"
 
     conditions_str = ", ".join(conditions) if conditions else "Не указано"
 
