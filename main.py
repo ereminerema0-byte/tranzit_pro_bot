@@ -45,7 +45,7 @@ def get_city_with_flag(city_name):
     
     # Точное совпадение
     if city in CITY_FLAGS:
-        return f"{CITY_FLAGS } {city}"
+        return f"{CITY_FLAGS[city]} {city}"
     
     # Поиск без учёта регистра
     city_lower = city.lower()
@@ -56,7 +56,7 @@ def get_city_with_flag(city_name):
     # Дополнительная логика по окончанию слова
     if any(city_lower.endswith(x) for x in ["ск", "град", "бург", "ов", "ино", "ево", "ка", "ль", "мь"]):
         return f"🇷🇺 {city}"
-    if any(city_lower.endswith(x) for x in ):
+    if any(city_lower.endswith(x) for x in ["он", "арё", "ат", "ент", "ан"]):
         return f"🇺🇿 {city}"
     
     return city
