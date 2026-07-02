@@ -333,12 +333,11 @@ async def view_my_ads_router(message: types.Message, state: FSMContext):
         if cargo_list:
             response = "Ваши объявления о грузах:\n"
             for cargo in cargo_list:
-                response += f"\nОткуда: {cargo[2 3 4]}\nВес: {cargo[5 6]} м³\nЦена: {cargo[7 8 9]}\n---"
+                response += f"\nОткуда: {cargo[2]}\nКуда: {cargo[3]}\nТип: {cargo[4]}\nВес: {cargo[5]} кг\nОбъем: {cargo[6]} м³\nЦена: {cargo[7]}\nДата: {cargo[8]}\nКонтакт: {cargo[9]}\n---"
         else:
             response = "У вас пока нет размещенных объявлений о грузах."
         await message.answer(response, reply_markup=get_logistician_main_keyboard())
         await state.set_state(LogisticianStates.main_menu)
-
 
 @dp.message(F.text == "🔄 Сменить роль")
 async def change_role(message: types.Message, state: FSMContext):
