@@ -626,7 +626,6 @@ async def process_single_message_cargo(message: types.Message, state: FSMContext
     await message.answer(response_text, reply_markup=builder.as_markup(resize_keyboard=True), parse_mode="Markdown")
     await state.set_state(LogisticianStates.confirming_cargo)
 
-
 @dp.message(LogisticianStates.confirming_cargo, F.text == "Да, всё верно")
 async def confirm_single_msg_cargo(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
@@ -634,7 +633,18 @@ async def confirm_single_msg_cargo(message: types.Message, state: FSMContext):
     logistician_id = get_logistician_id(message.from_user.id)
     
     for c in parsed_cargoes:
-        add_cargo(logistician_id, c['origin'], c['destination'], c['cargo'], 0, 0, c['conditions'], "В описании", c['contact'])
+        add_cargo(
+            logistician_id, 
+            c , 
+            c , 
+            c , 
+            c.get('weight_str', 0),           # Вес
+            0,                                # Объём
+            c.get('price', 'Не указано'),     # Цена
+            "В описании", 
+            c.get('contact', CONTACT_USERNAME)
+        )
+        
         channel_message = format_cargo_message(c) + f"\n🤖 @tranzit_pro_bot"
         try:
             await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
