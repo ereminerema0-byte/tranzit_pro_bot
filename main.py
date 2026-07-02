@@ -533,8 +533,18 @@ def parse_cargo_block(text):
         body = "Реф"
 
     # Груз
-    if "салафан" in full_lower:
+    if "лук" in full_lower or "луковиц" in full_lower:
+        cargo = "Лук"
+    elif "арбуз" in full_lower:
+        cargo = "Арбуз"
+    elif "цилиндровк" in full_lower or "кругляк" in full_lower or "пиломатериал" in full_lower or "пиломатериалы" in full_lower:
+        cargo = "Пиломатериалы"
+    elif "запчаст" in full_lower:
+        cargo = "Запчасти"
+    elif "салафан" in full_lower:
         cargo = "Салафан"
+    elif "помидор" in full_lower or "томат" in full_lower:
+        cargo = "Помидоры"
 
     # Условия
     if "аванс" in full_lower:
