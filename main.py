@@ -543,7 +543,9 @@ def parse_cargo_block(text):
         cargo = "Лук"
     elif "арбуз" in full_lower:
         cargo = "Арбуз"
-    elif "цилиндровк" in full_lower or "кругляк" in full_lower or "пиломатериал" in full_lower or "пиломатериалы" in full_lower:
+    elif "тахта" in full_lower:
+        cargo = "Тахта"
+    elif "цилиндровк" in full_lower or "кругляк" in full_lower or "пиломатериал" in full_lower:
         cargo = "Пиломатериалы"
     elif "запчаст" in full_lower:
         cargo = "Запчасти"
