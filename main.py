@@ -518,11 +518,15 @@ def parse_cargo_block(text):
             origin = alt_route.group(1).strip()
             destination = alt_route.group(2).strip()
 
-    # Вес
-    w = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)\s*(т|тонн|тонна|тн)', full_lower)
+    # Вес (улучшенный)
+    w = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)(?:\s*-\s*(\d{1,3}(?:[.,]\d{1,2})?))?\s*(т|тонн|тонна|тн)', full_lower)
     if w:
-        weight = w.group(1) + " т"
-
+        if w.group(2):
+            weight = f"{w.group(1)}-{w.group(2)} т"
+        else:
+            weight = f"{w.group(1)} т"
+    else:
+        weight = "Не указано"
     # Цена
     p = re.search(r'(?:фрахт|цена|фрaхт|стоимость) *(\d{3,5})', full_lower)
     if p:
@@ -539,12 +543,18 @@ def parse_cargo_block(text):
         body = "Реф"
 
     # Груз
-    if "лук" in full_lower or "луковиц" in full_lower:
+    if "сахар" in full_lower:
+        cargo = "Сахар"
+    elif "тахта" in full_lower:
+        cargo = "Тахта"
+    elif "лук" in full_lower or "луковиц" in full_lower:
         cargo = "Лук"
     elif "арбуз" in full_lower:
         cargo = "Арбуз"
-    elif "тахта" in full_lower:
-        cargo = "Тахта"
+    elif "дыня" in full_lower:
+        cargo = "Дыня"
+    elif "курага" in full_lower:
+        cargo = "Курага"
     elif "цилиндровк" in full_lower or "кругляк" in full_lower or "пиломатериал" in full_lower:
         cargo = "Пиломатериалы"
     elif "запчаст" in full_lower:
@@ -553,6 +563,8 @@ def parse_cargo_block(text):
         cargo = "Салафан"
     elif "помидор" in full_lower or "томат" in full_lower:
         cargo = "Помидоры"
+    else:
+        cargo = "Не указано"
 
     # Условия
     conditions = []
