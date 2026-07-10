@@ -547,22 +547,18 @@ def parse_cargo_block(text):
         cargo = "Сахар"
     elif "тахта" in full_lower:
         cargo = "Тахта"
-    elif "лук" in full_lower or "луковиц" in full_lower:
+    elif "рулон" in full_lower or "бумаг" in full_lower:
+        cargo = "Рулонная бумага"
+    elif "лук" in full_lower:
         cargo = "Лук"
     elif "арбуз" in full_lower:
         cargo = "Арбуз"
-    elif "дыня" in full_lower:
-        cargo = "Дыня"
-    elif "курага" in full_lower:
-        cargo = "Курага"
-    elif "цилиндровк" in full_lower or "кругляк" in full_lower or "пиломатериал" in full_lower:
+    elif "пиломатериал" in full_lower or "кругляк" in full_lower or "цилиндровк" in full_lower:
         cargo = "Пиломатериалы"
     elif "запчаст" in full_lower:
         cargo = "Запчасти"
     elif "салафан" in full_lower:
         cargo = "Салафан"
-    elif "помидор" in full_lower or "томат" in full_lower:
-        cargo = "Помидоры"
     else:
         cargo = "Не указано"
 
