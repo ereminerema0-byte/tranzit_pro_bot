@@ -1,6 +1,37 @@
 import asyncio
 import logging
+import os
 import re
+import sys
+
+# Configure logging early so fail-fast messages are visible
+logging.basicConfig(level=logging.INFO)
+
+# Bot configuration
+TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID", "@tranzitpro1")
+CONTACT_USERNAME = os.getenv("CONTACT_USERNAME", "@Oleg34381")
+CONTACT_MODE = (os.getenv("CONTACT_MODE") or "hybrid").strip().lower()
+
+# Fail-fast: do not start without a valid bot token
+if not TOKEN or not str(TOKEN).strip():
+    logging.error("Задайте BOT_TOKEN в переменных окружения")
+    sys.exit(1)
+TOKEN = str(TOKEN).strip()
+
+if CONTACT_MODE not in ("user", "hub", "hybrid"):
+    logging.warning(
+        "Неизвестный CONTACT_MODE=%s, используется hybrid",
+        CONTACT_MODE,
+    )
+    CONTACT_MODE = "hybrid"
+
+if not os.getenv("CHANNEL_ID"):
+    logging.warning(
+        "CHANNEL_ID не задан, используется значение по умолчанию: %s",
+        CHANNEL_ID,
+    )
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import CommandStart
@@ -9,13 +40,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 from db import init_db, add_user, get_user_role, get_driver_id, get_logistician_id, add_cargo, get_cargo_by_route, get_logistician_cargo, add_vehicle, get_vehicles_by_route, get_driver_vehicles, add_subscription, get_subscribers_for_route
-
-import os
-
-# Bot configuration
-TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID", "@tranzitpro1")
-CONTACT_USERNAME = os.getenv("CONTACT_USERNAME", "@Oleg34381")
 
 CITY_FLAGS = {
     "Андижон": "🇺🇿", "Наманган": "🇺🇿", "Ташкент": "🇺🇿", "Самарканд": "🇺🇿", "Бухара": "🇺🇿", 
@@ -61,8 +85,137 @@ def get_city_with_flag(city_name):
     
     return city
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+
+def escape_md(text) -> str:
+    """Escape Telegram legacy Markdown special characters in user input."""
+    if text is None:
+        return ""
+    s = str(text)
+    for ch in ("\\", "*", "_", "`", "["):
+        s = s.replace(ch, "\\" + ch)
+    return s
+
+
+def parse_positive_float(text):
+    """Parse a positive float from user text. Accepts ',' as decimal separator.
+    Returns float or None if invalid / not positive.
+    """
+    if text is None:
+        return None
+    s = str(text).strip().replace(",", ".")
+    if not s:
+        return None
+    try:
+        val = float(s)
+    except ValueError:
+        m = re.search(r"(\d+(?:\.\d+)?)", s)
+        if not m:
+            return None
+        try:
+            val = float(m.group(1))
+        except ValueError:
+            return None
+    if val <= 0:
+        return None
+    return val
+
+
+def extract_phone_contact(text):
+    """Extract phone or @username from free text. Returns str or None."""
+    if not text:
+        return None
+    s = str(text).strip()
+    # Telegram username
+    m = re.search(r"(@[A-Za-z0-9_]{5,})", s)
+    if m:
+        return m.group(1)
+    # Phone: +998..., 9–12 digits with optional spaces/dashes
+    m = re.search(r"(\+?\d[\d\s\-]{7,14}\d)", s)
+    if m:
+        phone = re.sub(r"[\s\-]", "", m.group(1))
+        digits = phone.lstrip("+")
+        if 9 <= len(digits) <= 12 and digits.isdigit():
+            return phone
+    return None
+
+
+def _normalize_user_contact(user_contact) -> str:
+    if user_contact is None:
+        return ""
+    s = str(user_contact).strip()
+    if not s or s.lower() in ("не указано", "none", "-"):
+        return ""
+    return s
+
+
+def format_publish_contact(user_contact) -> str:
+    """Contact line(s) for channel / notifications by CONTACT_MODE.
+
+    - user: real contact, CONTACT_USERNAME as fallback
+    - hub: always hub with explicit exchange label
+    - hybrid: real contact + hub (or hub only if no user contact)
+    """
+    user = _normalize_user_contact(user_contact)
+    hub = (CONTACT_USERNAME or "").strip()
+
+    if CONTACT_MODE == "user":
+        contact = user or hub
+        return f"📞 *Контакт:* {escape_md(contact)}"
+
+    if CONTACT_MODE == "hub":
+        return f"📞 *Связь через:* {escape_md(hub)} (биржа)"
+
+    # hybrid
+    if user and hub and user != hub:
+        return (
+            f"📞 *Контакт:* {escape_md(user)}\n"
+            f"🏛 *Связь через биржу:* {escape_md(hub)}"
+        )
+    contact = user or hub
+    if contact == hub and hub:
+        return f"📞 *Связь через:* {escape_md(hub)} (биржа)"
+    return f"📞 *Контакт:* {escape_md(contact)}"
+
+
+async def notify_route_subscribers(
+    origin,
+    destination,
+    summary_text: str,
+    author_telegram_id=None,
+):
+    """Send cargo notification to drivers subscribed to origin→destination."""
+    try:
+        subscribers = get_subscribers_for_route(origin, destination)
+    except Exception as e:
+        logging.error("Failed to load subscribers for %s → %s: %s", origin, destination, e)
+        return
+
+    for tg_id in subscribers:
+        if author_telegram_id is not None and tg_id == author_telegram_id:
+            continue
+        try:
+            await bot.send_message(tg_id, summary_text, parse_mode="Markdown")
+        except Exception as e:
+            logging.error("Failed to notify subscriber %s: %s", tg_id, e)
+
+
+def build_cargo_subscriber_notice(
+    origin,
+    destination,
+    cargo_type,
+    weight,
+    price,
+    user_contact,
+) -> str:
+    return (
+        f"🔔 *Новый груз по вашей подписке*\n\n"
+        f"📍 *Маршрут:* {escape_md(origin)} → {escape_md(destination)}\n"
+        f"🏷️ *Тип:* {escape_md(cargo_type)}\n"
+        f"⚖️ *Вес:* {escape_md(weight)}\n"
+        f"💰 *Цена:* {escape_md(price)}\n"
+        f"{format_publish_contact(user_contact)}"
+    )
+
 
 # Initialize bot and dispatcher
 bot = Bot(token=TOKEN)
@@ -224,6 +377,13 @@ async def driver_subscribe_origin(message: types.Message, state: FSMContext):
 async def driver_subscribe_destination(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     driver_id = get_driver_id(message.from_user.id)
+    if driver_id is None:
+        await message.answer(
+            "Сначала выберите роль водителя.",
+            reply_markup=get_role_keyboard(),
+        )
+        await state.set_state(UserRole.choosing_role)
+        return
     origin = user_data['subscribe_origin']
     destination = message.text
     add_subscription(driver_id, origin, destination)
@@ -269,7 +429,11 @@ async def driver_add_vehicle_body_type(message: types.Message, state: FSMContext
 
 @dp.message(DriverStates.adding_vehicle_capacity)
 async def driver_add_vehicle_capacity(message: types.Message, state: FSMContext):
-    await state.update_data(capacity=message.text)
+    capacity = parse_positive_float(message.text)
+    if capacity is None:
+        await message.answer("Введите число, например 20")
+        return
+    await state.update_data(capacity=capacity)
     await message.answer("Введите дату готовности машины (например, ДД.ММ.ГГГГ):")
     await state.set_state(DriverStates.adding_vehicle_date)
 
@@ -283,10 +447,27 @@ async def driver_add_vehicle_date(message: types.Message, state: FSMContext):
 async def driver_add_vehicle_contact(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     driver_id = get_driver_id(message.from_user.id)
+    if driver_id is None:
+        await message.answer(
+            "Сначала выберите роль водителя.",
+            reply_markup=get_role_keyboard(),
+        )
+        await state.set_state(UserRole.choosing_role)
+        return
+    capacity = user_data.get('capacity')
+    if not isinstance(capacity, (int, float)):
+        capacity = parse_positive_float(capacity)
+    if capacity is None:
+        await message.answer(
+            "Некорректная грузоподъёмность. Введите число, например 20",
+            reply_markup=get_driver_main_keyboard(),
+        )
+        await state.set_state(DriverStates.main_menu)
+        return
     add_vehicle(
         driver_id,
         user_data['body_type'],
-        float(user_data['capacity']),
+        float(capacity),
         user_data['origin'],
         user_data['destination'],
         user_data['date'],
@@ -300,12 +481,12 @@ async def driver_add_vehicle_contact(message: types.Message, state: FSMContext):
     dest_f = f"{user_data.get('destination_flag', '')} {user_data['destination']}".strip()
     channel_message = (
         f"🚚 *Свободная машина*\n\n"
-        f"📍 *Откуда:* {origin_f}\n"
-        f"📍 *Куда:* {dest_f}\n"
-        f"📦 *Тип кузова:* {user_data['body_type']}\n"
-        f"⚖️ *Грузоподъёмность:* {user_data['capacity']} т\n"
-        f"📅 *Дата готовности:* {user_data['date']}\n"
-        f"📞 *Контакт:* {CONTACT_USERNAME}\n\n"
+        f"📍 *Откуда:* {escape_md(origin_f)}\n"
+        f"📍 *Куда:* {escape_md(dest_f)}\n"
+        f"📦 *Тип кузова:* {escape_md(user_data['body_type'])}\n"
+        f"⚖️ *Грузоподъёмность:* {escape_md(capacity)} т\n"
+        f"📅 *Дата готовности:* {escape_md(user_data['date'])}\n"
+        f"{format_publish_contact(message.text)}\n\n"
         f"🤖 @tranzit_pro_bot"
     )
     try:
@@ -394,13 +575,21 @@ async def logistician_add_cargo_type(message: types.Message, state: FSMContext):
 
 @dp.message(LogisticianStates.adding_cargo_weight)
 async def logistician_add_cargo_weight(message: types.Message, state: FSMContext):
-    await state.update_data(weight=message.text)
+    weight = parse_positive_float(message.text)
+    if weight is None:
+        await message.answer("Введите число, например 20")
+        return
+    await state.update_data(weight=weight)
     await message.answer("Введите объем груза в м³:")
     await state.set_state(LogisticianStates.adding_cargo_volume)
 
 @dp.message(LogisticianStates.adding_cargo_volume)
 async def logistician_add_cargo_volume(message: types.Message, state: FSMContext):
-    await state.update_data(volume=message.text)
+    volume = parse_positive_float(message.text)
+    if volume is None:
+        await message.answer("Введите число, например 20")
+        return
+    await state.update_data(volume=volume)
     await message.answer("Введите цену:")
     await state.set_state(LogisticianStates.adding_cargo_price)
 
@@ -420,46 +609,79 @@ async def logistician_add_cargo_date(message: types.Message, state: FSMContext):
 async def logistician_add_cargo_contact(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     logistician_id = get_logistician_id(message.from_user.id)
+    if logistician_id is None:
+        await message.answer(
+            "Сначала выберите роль логиста.",
+            reply_markup=get_role_keyboard(),
+        )
+        await state.set_state(UserRole.choosing_role)
+        return
+
+    weight = user_data.get('weight')
+    volume = user_data.get('volume')
+    if not isinstance(weight, (int, float)):
+        weight = parse_positive_float(weight)
+    if not isinstance(volume, (int, float)):
+        volume = parse_positive_float(volume)
+    if weight is None or volume is None:
+        await message.answer(
+            "Некорректный вес или объём. Начните размещение заново.",
+            reply_markup=get_logistician_main_keyboard(),
+        )
+        await state.set_state(LogisticianStates.main_menu)
+        return
+
+    user_contact = message.text
     add_cargo(
         logistician_id,
         user_data['origin'],
         user_data['destination'],
         user_data['cargo_type'],
-        float(user_data['weight']),
-        float(user_data['volume']),
+        float(weight),
+        float(volume),
         user_data['price'],
         user_data['date'],
-        message.text
+        user_contact,
     )
     await message.answer("Ваш груз размещен!", reply_markup=get_logistician_main_keyboard())
     await state.set_state(LogisticianStates.main_menu)
 
-    # Auto-publish to channel
+    # Auto-publish to channel (same price as in DB — no hidden offset)
     origin_f = f"{user_data.get('origin_flag', '')} {user_data['origin']}".strip()
     dest_f = f"{user_data.get('destination_flag', '')} {user_data['destination']}".strip()
-    price_value = str(user_data['price']).replace('$', '').replace(',', '.').strip()
-    try:  
-        price_num = int(float(price_value))
-        price_display = f"{price_num - 200}$"
-    except:
-        price_display = user_data['price']
+    price_display = user_data['price']
     channel_message = (
-            f"📦 *Новый груз*\n\n"
-            f"📍 *Откуда:* {origin_f}\n"
-            f"📍 *Куда:* {dest_f}\n"
-            f"🏷️ *Тип груза:* {user_data['cargo_type']}\n"
-            f"⚖️ *Вес:* {user_data['weight']} кг\n"
-            f"📏 *Объем:* {user_data['volume']} м³\n"
-            f"💰 *Цена:* {price_display}\n"
-            f"📅 *Дата готовности:* {user_data['date']}\n"
-            f"📞 *Контакт:* {CONTACT_USERNAME}\n\n"
-            f"\n\n🤖 *Хотите быстро найти подходящий груз?*\nНапишите боту: @tranzit_pro_bot"
-    
-        )
+        f"📦 *Новый груз*\n\n"
+        f"📍 *Откуда:* {escape_md(origin_f)}\n"
+        f"📍 *Куда:* {escape_md(dest_f)}\n"
+        f"🏷️ *Тип груза:* {escape_md(user_data['cargo_type'])}\n"
+        f"⚖️ *Вес:* {escape_md(weight)} кг\n"
+        f"📏 *Объем:* {escape_md(volume)} м³\n"
+        f"💰 *Цена:* {escape_md(price_display)}\n"
+        f"📅 *Дата готовности:* {escape_md(user_data['date'])}\n"
+        f"{format_publish_contact(user_contact)}\n\n"
+        f"🤖 *Хотите быстро найти подходящий груз?*\n"
+        f"Напишите боту: @tranzit_pro_bot"
+    )
     try:
-        await bot.send_message(CHANNEL_ID, channel_message, parse_mode="HTML")
+        await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
     except Exception as e:
         logging.error(f"Failed to publish to channel: {e}")
+
+    notice = build_cargo_subscriber_notice(
+        user_data['origin'],
+        user_data['destination'],
+        user_data['cargo_type'],
+        f"{weight} кг",
+        price_display,
+        user_contact,
+    )
+    await notify_route_subscribers(
+        user_data['origin'],
+        user_data['destination'],
+        notice,
+        author_telegram_id=message.from_user.id,
+    )
 
 @dp.message(LogisticianStates.choosing_placement_mode, F.text == "Одним сообщением")
 async def logistician_add_cargo_single_msg(message: types.Message, state: FSMContext):
@@ -482,8 +704,6 @@ async def logistician_add_cargo_back(message: types.Message, state: FSMContext):
     await message.answer("Главное меню", reply_markup=get_logistician_main_keyboard())
     await state.set_state(LogisticianStates.main_menu)
 
-import re
-
 def parse_cargo_block(text):
     if not text or not text.strip():
         return None
@@ -498,7 +718,8 @@ def parse_cargo_block(text):
     body = "Не указано"
     price = "Не указано"
     conditions = []
-    contact = CONTACT_USERNAME
+    # Real contact from text (phone/@user); channel display uses CONTACT_MODE
+    contact = extract_phone_contact(full_text) or ""
 
     # Откуда и Куда
     route = re.search(r'Откуда\s*:\s*(.+?)\s*Куда\s*:\s*(.+)', full_text, re.IGNORECASE)
@@ -565,7 +786,7 @@ def parse_cargo_block(text):
     # Условия
     conditions = []
     full_lower = full_text.lower()
-    
+
     if "аванс" in full_lower:
         conditions.append("Аванс")
     if "налич" in full_lower:
@@ -577,23 +798,11 @@ def parse_cargo_block(text):
     if "готов" in full_lower:
         conditions.append("Груз готов")
 
-    conditions_str = ", ".join(conditions) if conditions else "Не указано"
-
     # Объединяем Безнал + Аванс
     if "Безнал" in conditions and "Аванс" in conditions:
         conditions.remove("Безнал")
         conditions.remove("Аванс")
         conditions.append("Безнал + Аванс")
-
-    conditions_str = ", ".join(conditions) if conditions else "Не указано"
-
-    # Объединяем "Безнал + Аванс" если оба есть
-    if "Безнал" in conditions and "Аванс" in conditions:
-        conditions.remove("Безнал")
-        conditions.remove("Аванс")
-        conditions.append("Безнал + Аванс")
-
-    conditions_str = ", ".join(conditions) if conditions else "Не указано"
 
     conditions_str = ", ".join(conditions) if conditions else "Не указано"
 
@@ -605,31 +814,26 @@ def parse_cargo_block(text):
         "body": body,
         "conditions": conditions_str,
         "price": price,
-        "contact": contact
+        "contact": contact,
     }
-                  
+
 def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c['origin'])
     dest_with_flag = get_city_with_flag(c['destination'])
-    
-    # Отнимаем 200$ от фрахта
-    try:
-        price_num = int(''.join(filter(str.isdigit, str(c.get('price', 0)))))
-        final_price = max(price_num - 200, 0)
-        price_text = f"{final_price}$"
-    except:
-        price_text = c.get('price', "Не указано")
+
+    # Same price as entered / stored — no hidden channel offset
+    price_text = c.get('price', "Не указано")
 
     return (
         f"📦 *Новое объявление о грузе:*\n\n"
-        f"🔹 *Откуда:* {origin_with_flag}\n"
-        f"🔹 *Куда:* {dest_with_flag}\n"
-        f"🔹 *Груз:* {c.get('cargo', 'Не указано')}\n"
-        f"🔹 *Вес:* {c.get('weight_str', 'Не указано')}\n"
-        f"🔹 *Кузов:* {c.get('body', 'Не указано')}\n"
-        f"💰 *Фрахт:* {price_text}\n"
-        f"🔹 *Условия:* {c.get('conditions', 'Не указано')}\n\n"
-        f"📞 *Контакт:* {c.get('contact', CONTACT_USERNAME)}\n"
+        f"🔹 *Откуда:* {escape_md(origin_with_flag)}\n"
+        f"🔹 *Куда:* {escape_md(dest_with_flag)}\n"
+        f"🔹 *Груз:* {escape_md(c.get('cargo', 'Не указано'))}\n"
+        f"🔹 *Вес:* {escape_md(c.get('weight_str', 'Не указано'))}\n"
+        f"🔹 *Кузов:* {escape_md(c.get('body', 'Не указано'))}\n"
+        f"💰 *Фрахт:* {escape_md(price_text)}\n"
+        f"🔹 *Условия:* {escape_md(c.get('conditions', 'Не указано'))}\n\n"
+        f"{format_publish_contact(c.get('contact'))}\n"
         f"\n\n🤖 *Хотите быстро найти подходящий груз?*\nНапишите боту: @tranzit\\_pro\\_bot"
     )
 
@@ -672,26 +876,50 @@ async def confirm_single_msg_cargo(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     parsed_cargoes = user_data.get('parsed_cargoes', [])
     logistician_id = get_logistician_id(message.from_user.id)
-    
-    for c in parsed_cargoes:
-        add_cargo(
-            logistician_id, 
-            c['origin'], 
-            c['destination'], 
-            c['cargo'], 
-            c.get('weight_str', 0), 
-            0, 
-            c.get('price', 'Не указано'), 
-            "В описании", 
-            c.get('contact', CONTACT_USERNAME)
+    if logistician_id is None:
+        await message.answer(
+            "Сначала выберите роль логиста.",
+            reply_markup=get_role_keyboard(),
         )
-        
+        await state.set_state(UserRole.choosing_role)
+        return
+
+    for c in parsed_cargoes:
+        weight_val = parse_positive_float(c.get('weight_str', '')) or 0
+        user_contact = c.get('contact') or ""
+        add_cargo(
+            logistician_id,
+            c['origin'],
+            c['destination'],
+            c['cargo'],
+            weight_val,
+            0,
+            c.get('price', 'Не указано'),
+            "В описании",
+            user_contact or CONTACT_USERNAME,
+        )
+
         channel_message = format_cargo_message(c) + f"\n🤖 @tranzit_pro_bot"
         try:
             await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
         except Exception as e:
             logging.error(f"Failed to publish to channel: {e}")
-            
+
+        notice = build_cargo_subscriber_notice(
+            c['origin'],
+            c['destination'],
+            c.get('cargo', 'Не указано'),
+            c.get('weight_str', 'Не указано'),
+            c.get('price', 'Не указано'),
+            user_contact,
+        )
+        await notify_route_subscribers(
+            c['origin'],
+            c['destination'],
+            notice,
+            author_telegram_id=message.from_user.id,
+        )
+
     await message.answer("Все объявления опубликованы!", reply_markup=get_logistician_main_keyboard())
     await state.set_state(LogisticianStates.main_menu)
 

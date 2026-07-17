@@ -2,7 +2,24 @@ __pycache__/
 *.pyc
 *.pyo
 *.db
+
+# Environment and secrets — never commit real tokens
 .env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.staging
+*.pem
+*.key
+secrets/
+secrets.*
+*credentials*
+*secret*
+*token*.txt
+*token*.json
+.bot_token
+
 .venv
 venv/
 *.log
