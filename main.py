@@ -686,17 +686,17 @@ async def logistician_add_cargo_contact(message: types.Message, state: FSMContex
 @dp.message(LogisticianStates.choosing_placement_mode, F.text == "Одним сообщением")
 async def logistician_add_cargo_single_msg(message: types.Message, state: FSMContext):
     await message.answer(
-        "Отправьте информацию о грузе одним сообщением в свободной форме.\n\n"
-        "Пример:\n"
-        "Андижон Нижний Новгород\n"
-        "Юк памидор\n"
-        "22 тонна\n"
-        "Реф керак\n"
-        "Выгрузка склад\n"
-        "Аванс бор\n"
-        "Срочно\n"
-        "973439606"
-    )
+    "Отправьте информацию о грузе **одним сообщением** в свободной форме.\n\n"
+    "**Пример:**\n"
+    "📍 Откуда: Алматы\n"
+    "📍 Куда: Ташкент\n"
+    "📦 Груз: Рулонная бумага\n"
+    "⚖️ Вес: 22 тонны\n"
+    "🚚 Кузов: Тент\n"
+    "💰 Фрахт: 1200$\n"
+    "📋 Условия: Наличные, перечисление, груз готов",
+    parse_mode="Markdown"
+)
     await state.set_state(LogisticianStates.single_message_input)
 
 @dp.message(LogisticianStates.choosing_placement_mode, F.text == "Назад")
