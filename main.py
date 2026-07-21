@@ -806,9 +806,7 @@ def parse_cargo_block(text):
         "contact": contact,
     }
 
-    
-
-def format_cargo_message(c):
+ def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c.get('origin', 'Не указано'))
     dest_with_flag = get_city_with_flag(c.get('destination', 'Не указано'))
 
@@ -822,7 +820,8 @@ def format_cargo_message(c):
         f"🔹 *Условия:* {escape_md(c.get('conditions', 'Не указано'))}\n\n"
         f"{format_publish_contact(c.get('contact'))}\n"
         f"\n\n🤖 *Хотите быстро найти подходящий груз?*\nНапишите боту: @tranzit\\_pro\\_bot"
-    )
+    )   
+
 @dp.message(LogisticianStates.single_message_input)
 async def process_single_message_cargo(message: types.Message, state: FSMContext):
     text = message.text.strip()
