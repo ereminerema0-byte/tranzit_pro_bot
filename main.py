@@ -853,7 +853,7 @@ async def process_single_message_cargo(message: types.Message, state: FSMContext
         return
 
     await state.update_data(parsed_cargoes=parsed_cargoes)
- response_text = "📋 *Распознанные объявления:*\n\n"
+    response_text = "📋 *Распознанные объявления:*\n\n"
     for i, c in enumerate(parsed_cargoes, 1):
         response_text += f"--- Объявление #{i} ---\n"
         response_text += format_cargo_message(c) + "\n\n"
