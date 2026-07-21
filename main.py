@@ -856,7 +856,8 @@ async def process_single_message_cargo(message: types.Message, state: FSMContext
 
     response_text = "📋 *Распознанные объявления:*\n\n"
     for i, c in enumerate(parsed_cargoes, 1):
-        response_text += f"--- Объявление #{i+1} ---\n{format_cargo_message(c)}\n\n"
+    response_text += f"--- Объявление #{i+1} ---\n"
+    response_text += format_cargo_message(c) + "\n\n"
     response_text += "Все верно? Каждое объявление будет опубликовано отдельно."
 
     builder = ReplyKeyboardBuilder()
