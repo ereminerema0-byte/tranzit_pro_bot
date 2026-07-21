@@ -812,15 +812,13 @@ def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c.get('origin', 'Не указано'))
     dest_with_flag = get_city_with_flag(c.get('destination', 'Не указано'))
 
-    price_text = c.get('price', "Не указано")
-
     return (
         f"🔹 *Откуда:* {escape_md(origin_with_flag)}\n"
         f"🔹 *Куда:* {escape_md(dest_with_flag)}\n"
         f"📦 *Груз:* {escape_md(c.get('cargo', 'Не указано'))}\n"
         f"⚖️ *Вес:* {escape_md(c.get('weight_str', 'Не указано'))}\n"
         f"🚚 *Кузов:* {escape_md(c.get('body', 'Не указано'))}\n"
-        f"💰 *Фрахт:* {escape_md(price_text)}\n"
+        f"💰 *Фрахт:* {escape_md(c.get('price', 'Не указано'))}\n"
         f"🔹 *Условия:* {escape_md(c.get('conditions', 'Не указано'))}\n\n"
         f"{format_publish_contact(c.get('contact'))}\n"
         f"\n\n🤖 *Хотите быстро найти подходящий груз?*\nНапишите боту: @tranzit\\_pro\\_bot"
