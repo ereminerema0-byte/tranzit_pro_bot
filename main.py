@@ -10,23 +10,17 @@ logging.basicConfig(level=logging.INFO)
 # Bot configuration
 TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@tranzitpro1")
-# Hub contact is optional and never used as a silent replacement of the author.
-# CONTACT_MODE=user (default): always show the contact of the person who posted.
+# Ads always show the contact of the person who posted.
+# CONTACT_USERNAME is intentionally NOT used in announcements (was wrongly
+# substituting one fixed hub username for every cargo). Kept only so old
+# Railway env vars do not break process startup.
 CONTACT_USERNAME = (os.getenv("CONTACT_USERNAME") or "").strip()
-CONTACT_MODE = (os.getenv("CONTACT_MODE") or "user").strip().lower()
 
 # Fail-fast: do not start without a valid bot token
 if not TOKEN or not str(TOKEN).strip():
     logging.error("Задайте BOT_TOKEN в переменных окружения")
     sys.exit(1)
 TOKEN = str(TOKEN).strip()
-
-if CONTACT_MODE not in ("user", "hub", "hybrid"):
-    logging.warning(
-        "Неизвестный CONTACT_MODE=%s, используется user",
-        CONTACT_MODE,
-    )
-    CONTACT_MODE = "user"
 
 if not os.getenv("CHANNEL_ID"):
     logging.warning(
@@ -151,9 +145,12 @@ def _normalize_user_contact(user_contact) -> str:
 
 
 def resolve_author_contact(explicit_contact=None, telegram_user=None) -> str:
-    """Contact of the person who posted: explicit text, else Telegram @username.
+    """Contact of the person who posted the ad.
 
-    Never substitutes a global hub username for the author.
+    Priority:
+    1) phone / @username they entered or that was parsed from the text
+    2) their Telegram @username
+    Never uses a global hub username (CONTACT_USERNAME).
     """
     contact = _normalize_user_contact(explicit_contact)
     if contact:
@@ -162,40 +159,24 @@ def resolve_author_contact(explicit_contact=None, telegram_user=None) -> str:
         username = getattr(telegram_user, "username", None)
         if username:
             return f"@{username}"
+        # Last resort: first+last name so the ad still identifies the author
+        parts = []
+        first = getattr(telegram_user, "first_name", None) or ""
+        last = getattr(telegram_user, "last_name", None) or ""
+        if first:
+            parts.append(str(first).strip())
+        if last:
+            parts.append(str(last).strip())
+        if parts:
+            return " ".join(parts)
     return ""
 
 
 def format_publish_contact(user_contact) -> str:
-    """Contact line(s) for channel / notifications by CONTACT_MODE.
-
-    - user (default): contact of the poster only
-    - hub: always hub with explicit exchange label
-    - hybrid: poster contact + optional hub (hub never replaces poster silently)
-    """
+    """Always show the poster's contact — never a hardcoded hub username."""
     user = _normalize_user_contact(user_contact)
-    hub = (CONTACT_USERNAME or "").strip()
-
-    if CONTACT_MODE == "user":
-        contact = user or "не указан"
-        return f"📞 *Контакт:* {escape_md(contact)}"
-
-    if CONTACT_MODE == "hub":
-        if not hub:
-            contact = user or "не указан"
-            return f"📞 *Контакт:* {escape_md(contact)}"
-        return f"📞 *Связь через:* {escape_md(hub)} (биржа)"
-
-    # hybrid: show author first; hub only as extra line when configured
-    if user and hub and user != hub:
-        return (
-            f"📞 *Контакт:* {escape_md(user)}\n"
-            f"🏛 *Связь через биржу:* {escape_md(hub)}"
-        )
-    if user:
-        return f"📞 *Контакт:* {escape_md(user)}"
-    if hub:
-        return f"📞 *Связь через:* {escape_md(hub)} (биржа)"
-    return f"📞 *Контакт:* {escape_md('не указан')}"
+    contact = user or "не указан"
+    return f"📞 *Контакт:* {escape_md(contact)}"
 
 
 async def notify_route_subscribers(
