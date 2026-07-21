@@ -853,8 +853,7 @@ async def process_single_message_cargo(message: types.Message, state: FSMContext
         response_text += f"--- Объявление #{i} ---\n"
         response_text += format_cargo_message(c) + "\n\n"
 
-    response_text += "Все верно? Каждое объявление будет опубликовано отдельно."   
-
+    response_text += "Все верно? Каждое объявление будет опубликовано отдельно."
     builder = ReplyKeyboardBuilder()
     builder.add(types.KeyboardButton(text="Да, всё верно"))
     builder.add(types.KeyboardButton(text="Нет, ввести заново"))
