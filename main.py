@@ -721,44 +721,39 @@ def parse_cargo_block(text):
     body = "Не указано"
     price = "Не указано"
     conditions = []
-    # Contact from free text (phone / @username); author Telegram used as fallback later
     contact = extract_phone_contact(full_text) or ""
 
-    # Откуда и Куда
-    route = re.search(r'Откуда\s*:\s*(.+?)\s*Куда\s*:\s*(.+)', full_text, re.IGNORECASE)
-    if route:
-        origin = route.group(1).strip()
-        destination = route.group(2).strip()
-    if not route:
-        route = re.search(r'( +?)\s*[:\-→]\s*( +)', full_text, re.IGNORECASE)
+    # === УЛУЧШЕННЫЙ ПОИСК МАРШРУТА ===
+    # Формат с "Откуда:" и "Куда:"
+    route = re.search(r'Откуда\s*[:\-→]?\s*(.+?)\s*Куда\s*[:\-→]?\s*(.+)', full_text, re.IGNORECASE | re.DOTALL)
     if route:
         origin = route.group(1).strip()
         destination = route.group(2).strip()
 
-    # Запасной вариант поиска маршрута
+    # Формат "Город1 → Город2" или "Город1 - Город2"
     if origin == "Не указано":
-        alt_route = re.search(r'([А-ЯЁA-Z][а-яёa-z\s-]+?)\s*[:\-→]\s*([А-ЯЁA-Z][а-яёa-z\s-]+)', full_text, re.IGNORECASE)
-        if alt_route:
-            origin = alt_route.group(1).strip()
-            destination = alt_route.group(2).strip()
+        alt = re.search(r'([А-ЯЁA-Z][а-яёa-z\s.,-]+?)\s*[:\-→]\s*([А-ЯЁA-Z][а-яёa-z\s.,-]+)', full_text, re.IGNORECASE)
+        if alt:
+            origin = alt.group(1).strip()
+            destination = alt.group(2).strip()
 
-    # Вес (улучшенный)
-    w = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)(?:\s*-\s*(\d{1,3}(?:[.,]\d{1,2})?))?\s*(т|тонн|тонна|тн)', full_lower)
+    # Если маршрут в первой строке
+    if origin == "Не указано":
+        first_line = full_text.splitlines()[0]
+        cities = re.findall(r'([А-ЯЁA-Z][а-яёa-z\s.,-]+)', first_line)
+        if len(cities) >= 2:
+            origin = cities[0].strip()
+            destination = cities[-1].strip()
+
+    # Вес
+    w = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)\s*(т|тонн|тонна|тн)', full_lower)
     if w:
-        if w.group(2):
-            weight = f"{w.group(1)}-{w.group(2)} т"
-        else:
-            weight = f"{w.group(1)} т"
-    else:
-        weight = "Не указано"
+        weight = f"{w.group(1)} т"
+
     # Цена
-    p = re.search(r'(?:фрахт|цена|фрaхт|стоимость) *(\d{3,5})', full_lower)
+    p = re.search(r'(\d{3,5})\s*\$', full_text)
     if p:
         price = p.group(1) + "$"
-    else:
-        p2 = re.search(r'(\d{3,5})\s*\$', full_lower)
-        if p2:
-            price = p2.group(1) + "$"
 
     # Кузов
     if "тент" in full_lower:
@@ -766,30 +761,27 @@ def parse_cargo_block(text):
     elif "реф" in full_lower:
         body = "Реф"
 
-    # Груз
-    if "сахар" in full_lower:
-        cargo = "Сахар"
-    elif "тахта" in full_lower:
+    # Груз (расширили)
+    if "тахта" in full_lower:
         cargo = "Тахта"
-    elif "рулон" in full_lower or "бумаг" in full_lower:
-        cargo = "Рулонная бумага"
-    elif "лук" in full_lower:
-        cargo = "Лук"
-    elif "арбуз" in full_lower:
-        cargo = "Арбуз"
-    elif "пиломатериал" in full_lower or "кругляк" in full_lower or "цилиндровк" in full_lower:
+    elif "дсп" in full_lower:
+        cargo = "ДСП"
+    elif "пиломатериал" in full_lower or "оцилиндр" in full_lower:
         cargo = "Пиломатериалы"
-    elif "запчаст" in full_lower:
-        cargo = "Запчасти"
     elif "салафан" in full_lower:
-        cargo = "Салафан"
-    else:
-        cargo = "Не указано"
+        cargo = "Прессованные салафаны"
+    elif "гранит" in full_lower:
+        cargo = "Гранит"
+    elif "масло" in full_lower:
+        cargo = "Масло"
+    elif "алюмин" in full_lower or "профиль" in full_lower:
+        cargo = "Алюминиевый профиль"
+    elif "бор" in full_lower:
+        cargo = "Бор"
+    elif "рулон" in full_lower:
+        cargo = "Рулонная бумага"
 
     # Условия
-    conditions = []
-    full_lower = full_text.lower()
-
     if "аванс" in full_lower:
         conditions.append("Аванс")
     if "налич" in full_lower:
@@ -800,12 +792,6 @@ def parse_cargo_block(text):
         conditions.append("Срочно")
     if "готов" in full_lower:
         conditions.append("Груз готов")
-
-    # Объединяем Безнал + Аванс
-    if "Безнал" in conditions and "Аванс" in conditions:
-        conditions.remove("Безнал")
-        conditions.remove("Аванс")
-        conditions.append("Безнал + Аванс")
 
     conditions_str = ", ".join(conditions) if conditions else "Не указано"
 
@@ -819,6 +805,8 @@ def parse_cargo_block(text):
         "price": price,
         "contact": contact,
     }
+
+    
 
 def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c['origin'])
