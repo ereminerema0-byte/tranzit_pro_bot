@@ -10,8 +10,10 @@ logging.basicConfig(level=logging.INFO)
 # Bot configuration
 TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@tranzitpro1")
-CONTACT_USERNAME = os.getenv("CONTACT_USERNAME", "@Oleg34381")
-CONTACT_MODE = (os.getenv("CONTACT_MODE") or "hybrid").strip().lower()
+# Hub contact is optional and never used as a silent replacement of the author.
+# CONTACT_MODE=user (default): always show the contact of the person who posted.
+CONTACT_USERNAME = (os.getenv("CONTACT_USERNAME") or "").strip()
+CONTACT_MODE = (os.getenv("CONTACT_MODE") or "user").strip().lower()
 
 # Fail-fast: do not start without a valid bot token
 if not TOKEN or not str(TOKEN).strip():
@@ -21,10 +23,10 @@ TOKEN = str(TOKEN).strip()
 
 if CONTACT_MODE not in ("user", "hub", "hybrid"):
     logging.warning(
-        "Неизвестный CONTACT_MODE=%s, используется hybrid",
+        "Неизвестный CONTACT_MODE=%s, используется user",
         CONTACT_MODE,
     )
-    CONTACT_MODE = "hybrid"
+    CONTACT_MODE = "user"
 
 if not os.getenv("CHANNEL_ID"):
     logging.warning(
@@ -148,33 +150,52 @@ def _normalize_user_contact(user_contact) -> str:
     return s
 
 
+def resolve_author_contact(explicit_contact=None, telegram_user=None) -> str:
+    """Contact of the person who posted: explicit text, else Telegram @username.
+
+    Never substitutes a global hub username for the author.
+    """
+    contact = _normalize_user_contact(explicit_contact)
+    if contact:
+        return contact
+    if telegram_user is not None:
+        username = getattr(telegram_user, "username", None)
+        if username:
+            return f"@{username}"
+    return ""
+
+
 def format_publish_contact(user_contact) -> str:
     """Contact line(s) for channel / notifications by CONTACT_MODE.
 
-    - user: real contact, CONTACT_USERNAME as fallback
+    - user (default): contact of the poster only
     - hub: always hub with explicit exchange label
-    - hybrid: real contact + hub (or hub only if no user contact)
+    - hybrid: poster contact + optional hub (hub never replaces poster silently)
     """
     user = _normalize_user_contact(user_contact)
     hub = (CONTACT_USERNAME or "").strip()
 
     if CONTACT_MODE == "user":
-        contact = user or hub
+        contact = user or "не указан"
         return f"📞 *Контакт:* {escape_md(contact)}"
 
     if CONTACT_MODE == "hub":
+        if not hub:
+            contact = user or "не указан"
+            return f"📞 *Контакт:* {escape_md(contact)}"
         return f"📞 *Связь через:* {escape_md(hub)} (биржа)"
 
-    # hybrid
+    # hybrid: show author first; hub only as extra line when configured
     if user and hub and user != hub:
         return (
             f"📞 *Контакт:* {escape_md(user)}\n"
             f"🏛 *Связь через биржу:* {escape_md(hub)}"
         )
-    contact = user or hub
-    if contact == hub and hub:
+    if user:
+        return f"📞 *Контакт:* {escape_md(user)}"
+    if hub:
         return f"📞 *Связь через:* {escape_md(hub)} (биржа)"
-    return f"📞 *Контакт:* {escape_md(contact)}"
+    return f"📞 *Контакт:* {escape_md('не указан')}"
 
 
 async def notify_route_subscribers(
@@ -464,6 +485,7 @@ async def driver_add_vehicle_contact(message: types.Message, state: FSMContext):
         )
         await state.set_state(DriverStates.main_menu)
         return
+    author_contact = resolve_author_contact(message.text, message.from_user)
     add_vehicle(
         driver_id,
         user_data['body_type'],
@@ -471,7 +493,7 @@ async def driver_add_vehicle_contact(message: types.Message, state: FSMContext):
         user_data['origin'],
         user_data['destination'],
         user_data['date'],
-        message.text
+        author_contact,
     )
     await message.answer("Ваше объявление о свободной машине размещено!", reply_markup=get_driver_main_keyboard())
     await state.set_state(DriverStates.main_menu)
@@ -486,7 +508,7 @@ async def driver_add_vehicle_contact(message: types.Message, state: FSMContext):
         f"📦 *Тип кузова:* {escape_md(user_data['body_type'])}\n"
         f"⚖️ *Грузоподъёмность:* {escape_md(capacity)} т\n"
         f"📅 *Дата готовности:* {escape_md(user_data['date'])}\n"
-        f"{format_publish_contact(message.text)}\n\n"
+        f"{format_publish_contact(author_contact)}\n\n"
         f"🤖 @tranzit_pro_bot"
     )
     try:
@@ -631,7 +653,7 @@ async def logistician_add_cargo_contact(message: types.Message, state: FSMContex
         await state.set_state(LogisticianStates.main_menu)
         return
 
-    user_contact = message.text
+    user_contact = resolve_author_contact(message.text, message.from_user)
     add_cargo(
         logistician_id,
         user_data['origin'],
@@ -718,7 +740,7 @@ def parse_cargo_block(text):
     body = "Не указано"
     price = "Не указано"
     conditions = []
-    # Real contact from text (phone/@user); channel display uses CONTACT_MODE
+    # Contact from free text (phone / @username); author Telegram used as fallback later
     contact = extract_phone_contact(full_text) or ""
 
     # Откуда и Куда
@@ -850,6 +872,11 @@ async def process_single_message_cargo(message: types.Message, state: FSMContext
     for block in blocks:
         parsed = parse_cargo_block(block)
         if parsed:
+            # Prefer contact from text; otherwise Telegram @username of the poster
+            parsed["contact"] = resolve_author_contact(
+                parsed.get("contact"),
+                message.from_user,
+            )
             parsed_cargoes.append(parsed)
 
     if not parsed_cargoes:
@@ -886,7 +913,12 @@ async def confirm_single_msg_cargo(message: types.Message, state: FSMContext):
 
     for c in parsed_cargoes:
         weight_val = parse_positive_float(c.get('weight_str', '')) or 0
-        user_contact = c.get('contact') or ""
+        # Always store/show the poster contact — never a global hub username
+        user_contact = resolve_author_contact(
+            c.get('contact'),
+            message.from_user,
+        )
+        c['contact'] = user_contact
         add_cargo(
             logistician_id,
             c['origin'],
@@ -896,7 +928,7 @@ async def confirm_single_msg_cargo(message: types.Message, state: FSMContext):
             0,
             c.get('price', 'Не указано'),
             "В описании",
-            user_contact or CONTACT_USERNAME,
+            user_contact,
         )
 
         channel_message = format_cargo_message(c) + f"\n🤖 @tranzit_pro_bot"

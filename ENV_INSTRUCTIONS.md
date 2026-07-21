@@ -6,19 +6,19 @@
 
 ## Рекомендуемые переменные
 
-- `CONTACT_MODE` — режим контакта в канале: `user` | `hub` | `hybrid` (по умолчанию `hybrid`)
-  - `user` — контакт автора, `CONTACT_USERNAME` только как fallback
+- `CONTACT_MODE` — режим контакта в канале: `user` | `hub` | `hybrid` (по умолчанию `user`)
+  - `user` — **контакт того, кто разместил** (телефон из текста или Telegram @username)
   - `hub` — всегда контакт биржи с пометкой «биржа»
-  - `hybrid` — контакт автора + контакт биржи
-- `CONTACT_USERNAME` — контакт биржи/хаба (для `hub` и `hybrid`)
+  - `hybrid` — контакт автора + контакт биржи (хаб не подменяет автора)
+- `CONTACT_USERNAME` — контакт биржи/хаба (только для `hub` и `hybrid`; **не** используется как подмена автора)
 - `ADMIN_ID` — ваш Telegram ID
 - `CHANNEL_ID` — ID канала для публикации (начинается на -100...)
 - `DATABASE_PATH` — путь к базе данных (по умолчанию `bot.db`)
 
 ## Рекомендуемые значения
 
-CONTACT_MODE=hybrid
-CONTACT_USERNAME=@your_hub_username
+CONTACT_MODE=user
+CONTACT_USERNAME=
 DATABASE_PATH=bot.db
 
 **Как настроить:**
