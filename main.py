@@ -806,7 +806,8 @@ def parse_cargo_block(text):
         "contact": contact,
     }
 
- def format_cargo_message(c):
+ 
+def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c.get('origin', 'Не указано'))
     dest_with_flag = get_city_with_flag(c.get('destination', 'Не указано'))
 
