@@ -707,6 +707,95 @@ async def logistician_add_cargo_back(message: types.Message, state: FSMContext):
     await message.answer("Главное меню", reply_markup=get_logistician_main_keyboard())
     await state.set_state(LogisticianStates.main_menu)
 
+# Labels that start a new field in free-form cargo ads (used as stop markers).
+_CARGO_FIELD_LABELS = (
+    "откуда", "куда", "груз", "тип груза", "вес", "кузов", "тип кузова",
+    "фрахт", "цена", "стоимость", "условия", "контакт", "телефон", "дата",
+)
+
+
+def _strip_field_noise(value: str) -> str:
+    """Clean a single field value: one line, no leading emoji noise."""
+    if not value:
+        return ""
+    # Take only the first line so multi-line capture cannot leak other fields
+    s = str(value).splitlines()[0].strip()
+    # Drop leading location/package emoji and bullet markers
+    s = re.sub(r"^[\s📍🔹📦⚖️🚚💰📞🏷️📅\-•*]+", "", s)
+    s = s.strip(" \t,;|")
+    return s
+
+
+def _extract_labeled_field(text: str, labels) -> str:
+    """Extract value after 'Label:' up to end of line (never past the next field)."""
+    if not text:
+        return ""
+    for label in labels:
+        # Optional emoji/bullet prefix before the label (📍 Откуда: …)
+        pat = (
+            rf"(?:^|\n)\s*(?:[📍🔹📦⚖️🚚💰📞🏷️📅\-•*]+\s*)?"
+            rf"{re.escape(label)}\s*:\s*(.+?)(?:\s*$|\n)"
+        )
+        m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
+        if m:
+            val = _strip_field_noise(m.group(1))
+            if val:
+                return val
+    return ""
+
+
+def _normalize_city_name(name: str) -> str:
+    """City only — strip flags, commas, and any leaked extra fields."""
+    s = _strip_field_noise(name)
+    if not s:
+        return "Не указано"
+    # If a leaked label slipped in, cut before it
+    lower = s.lower()
+    for lab in _CARGO_FIELD_LABELS:
+        idx = lower.find(lab + ":")
+        if idx > 0:
+            s = s[:idx].strip(" \t,;")
+            lower = s.lower()
+            break
+        idx = lower.find(lab + " :")
+        if idx > 0:
+            s = s[:idx].strip(" \t,;")
+            lower = s.lower()
+            break
+    s = s.strip(" \t,;")
+    return s or "Не указано"
+
+
+def _guess_cargo_type(text_lower: str) -> str:
+    if "сахар" in text_lower:
+        return "Сахар"
+    if "тахта" in text_lower:
+        return "Тахта"
+    if "дсп" in text_lower:
+        return "ДСП"
+    if "рулон" in text_lower or "бумаг" in text_lower:
+        return "Рулонная бумага"
+    if "лук" in text_lower:
+        return "Лук"
+    if "арбуз" in text_lower:
+        return "Арбуз"
+    if "пиломатериал" in text_lower or "кругляк" in text_lower or "цилиндровк" in text_lower or "оцилиндр" in text_lower:
+        return "Пиломатериалы"
+    if "запчаст" in text_lower:
+        return "Запчасти"
+    if "салафан" in text_lower:
+        return "Прессованные салафаны"
+    if "гранит" in text_lower:
+        return "Гранит"
+    if "масло" in text_lower:
+        return "Масло"
+    if "алюмин" in text_lower or "профиль" in text_lower:
+        return "Алюминиевый профиль"
+    if "бор" in text_lower:
+        return "Бор"
+    return "Не указано"
+
+
 def parse_cargo_block(text):
     if not text or not text.strip():
         return None
@@ -714,86 +803,121 @@ def parse_cargo_block(text):
     full_text = text.strip()
     full_lower = full_text.lower()
 
-    origin = "Не указано"
-    destination = "Не указано"
-    cargo = "Не указано"
-    weight = "Не указано"
-    body = "Не указано"
-    price = "Не указано"
-    conditions = []
+    # Contact from free text (phone / @username); author Telegram used as fallback later
     contact = extract_phone_contact(full_text) or ""
 
-    # === УЛУЧШЕННЫЙ ПОИСК МАРШРУТА ===
-    # Формат с "Откуда:" и "Куда:"
-    route = re.search(r'Откуда\s*[:\-→]?\s*(.+?)\s*Куда\s*[:\-→]?\s*(.+)', full_text, re.IGNORECASE | re.DOTALL)
-    if route:
-        origin = route.group(1).strip()
-        destination = route.group(2).strip()
+    # --- Route: prefer per-line labels so "Куда" never swallows the rest of the ad ---
+    origin = _extract_labeled_field(full_text, ("Откуда",))
+    destination = _extract_labeled_field(full_text, ("Куда",))
 
-    # Формат "Город1 → Город2" или "Город1 - Город2"
-    if origin == "Не указано":
-        alt = re.search(r'([А-ЯЁA-Z][а-яёa-z\s.,-]+?)\s*[:\-→]\s*([А-ЯЁA-Z][а-яёa-z\s.,-]+)', full_text, re.IGNORECASE)
-        if alt:
-            origin = alt.group(1).strip()
-            destination = alt.group(2).strip()
+    if not origin or not destination:
+        # Same-line: Откуда: X Куда: Y  (Y stops at newline or next known label)
+        route = re.search(
+            r"Откуда\s*:\s*(.+?)\s*Куда\s*:\s*(.+?)(?=\n|"
+            r"(?:Груз|Вес|Кузов|Фрахт|Цена|Стоимость|Условия|Контакт)\s*:|$)",
+            full_text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if route:
+            if not origin:
+                origin = _strip_field_noise(route.group(1))
+            if not destination:
+                destination = _strip_field_noise(route.group(2))
 
-    # Если маршрут в первой строке
-    if origin == "Не указано":
+    if not origin or not destination:
+        # Free form: City → City / City - City
+        alt_route = re.search(
+            r"([А-ЯЁA-Z][а-яёa-zA-ZЁё\-]*(?:\s+[А-ЯЁA-Zа-яёa-zA-ZЁё\-]+)?)"
+            r"\s*[:\-→]+\s*"
+            r"([А-ЯЁA-Z][а-яёa-zA-ZЁё\-]*(?:\s+[А-ЯЁA-Zа-яёa-zA-ZЁё\-]+)?)",
+            full_text,
+        )
+        if alt_route:
+            if not origin:
+                origin = _strip_field_noise(alt_route.group(1))
+            if not destination:
+                destination = _strip_field_noise(alt_route.group(2))
+
+    # First line with two city-like tokens (e.g. "Самарканд Ташкент")
+    if not origin or not destination:
         first_line = full_text.splitlines()[0]
-        cities = re.findall(r'([А-ЯЁA-Z][а-яёa-z\s.,-]+)', first_line)
+        cities = re.findall(r"([А-ЯЁA-Z][а-яёa-zA-ZЁё\-]+(?:\s+[А-ЯЁA-Zа-яёa-zA-ZЁё\-]+)?)", first_line)
         if len(cities) >= 2:
-            origin = cities[0].strip()
-            destination = cities[-1].strip()
+            if not origin:
+                origin = _strip_field_noise(cities[0])
+            if not destination:
+                destination = _strip_field_noise(cities[-1])
 
-    # Вес
-    w = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)\s*(т|тонн|тонна|тн)', full_lower)
+    origin = _normalize_city_name(origin) if origin else "Не указано"
+    destination = _normalize_city_name(destination) if destination else "Не указано"
+
+    # --- Weight ---
+    weight = "Не указано"
+    weight_labeled = _extract_labeled_field(full_text, ("Вес",))
+    weight_src = weight_labeled.lower() if weight_labeled else full_lower
+    w = re.search(
+        r"(\d{1,3}(?:[.,]\d{1,2})?)(?:\s*-\s*(\d{1,3}(?:[.,]\d{1,2})?))?\s*(т|тонн|тонна|тонны|тн)",
+        weight_src,
+    )
     if w:
-        weight = f"{w.group(1)} т"
+        if w.group(2):
+            weight = f"{w.group(1)}-{w.group(2)} т"
+        else:
+            weight = f"{w.group(1)} т"
 
-    # Цена
-    p = re.search(r'(\d{3,5})\s*\$', full_text)
-    if p:
-        price = p.group(1) + "$"
+    # --- Price / freight ---
+    price = "Не указано"
+    price_labeled = _extract_labeled_field(full_text, ("Фрахт", "Цена", "Стоимость"))
+    price_src = price_labeled.lower() if price_labeled else full_lower
+    p_dollar = re.search(r"(\d{3,5})\s*\$", price_src if "$" in price_src else full_text)
+    if p_dollar:
+        price = p_dollar.group(1) + "$"
+    else:
+        p2 = re.search(r"(?:фрахт|цена|стоимость)\s*:?\s*(\d{3,5})", full_lower)
+        if p2:
+            price = p2.group(1) + "$"
+        elif price_labeled and re.search(r"\d{3,5}", price_labeled):
+            price = re.search(r"(\d{3,5})", price_labeled).group(1) + "$"
 
-    # Кузов
-    if "тент" in full_lower:
-        body = "Тент"
-    elif "реф" in full_lower:
-        body = "Реф"
+    # --- Body type: prefer full labeled value (e.g. "Тент фура КК") ---
+    body = _extract_labeled_field(full_text, ("Кузов", "Тип кузова"))
+    if not body:
+        if "тент" in full_lower:
+            body = "Тент"
+        elif "реф" in full_lower:
+            body = "Реф"
+        else:
+            body = "Не указано"
 
-    # Груз (расширили)
-    if "тахта" in full_lower:
-        cargo = "Тахта"
-    elif "дсп" in full_lower:
-        cargo = "ДСП"
-    elif "пиломатериал" in full_lower or "оцилиндр" in full_lower:
-        cargo = "Пиломатериалы"
-    elif "салафан" in full_lower:
-        cargo = "Прессованные салафаны"
-    elif "гранит" in full_lower:
-        cargo = "Гранит"
-    elif "масло" in full_lower:
-        cargo = "Масло"
-    elif "алюмин" in full_lower or "профиль" in full_lower:
-        cargo = "Алюминиевый профиль"
-    elif "бор" in full_lower:
-        cargo = "Бор"
-    elif "рулон" in full_lower:
-        cargo = "Рулонная бумага"
+    # --- Cargo: prefer labeled value, else keyword guess ---
+    cargo = _extract_labeled_field(full_text, ("Груз", "Тип груза"))
+    if not cargo:
+        cargo = _guess_cargo_type(full_lower)
+    else:
+        guessed = _guess_cargo_type(cargo.lower())
+        if guessed != "Не указано":
+            cargo = guessed
 
-    # Условия
-    if "аванс" in full_lower:
+    # --- Conditions ---
+    conditions = []
+    conditions_labeled = _extract_labeled_field(full_text, ("Условия",))
+    cond_src = conditions_labeled.lower() if conditions_labeled else full_lower
+
+    if "аванс" in cond_src:
         conditions.append("Аванс")
-    if "налич" in full_lower:
+    if "налич" in cond_src:
         conditions.append("Наличные")
-    if "перечисл" in full_lower or "безнал" in full_lower:
+    if "перечисл" in cond_src or "безнал" in cond_src:
         conditions.append("Перечисление")
-    if "срочно" in full_lower:
+    if "срочно" in cond_src:
         conditions.append("Срочно")
-    if "готов" in full_lower:
+    if "готов" in cond_src:
         conditions.append("Груз готов")
 
-    conditions_str = ", ".join(conditions) if conditions else "Не указано"
+    if conditions_labeled and conditions_labeled.lower() in ("не указано", "-", "нет", "—"):
+        conditions_str = "Не указано"
+    else:
+        conditions_str = ", ".join(conditions) if conditions else "Не указано"
 
     return {
         "origin": origin,
@@ -806,10 +930,10 @@ def parse_cargo_block(text):
         "contact": contact,
     }
 
- 
+
 def format_cargo_message(c):
-    origin_with_flag = get_city_with_flag(c.get('origin', 'Не указано'))
-    dest_with_flag = get_city_with_flag(c.get('destination', 'Не указано'))
+    origin_with_flag = get_city_with_flag(c.get("origin", "Не указано"))
+    dest_with_flag = get_city_with_flag(c.get("destination", "Не указано"))
 
     return (
         f"🔹 *Откуда:* {escape_md(origin_with_flag)}\n"
@@ -821,13 +945,14 @@ def format_cargo_message(c):
         f"🔹 *Условия:* {escape_md(c.get('conditions', 'Не указано'))}\n\n"
         f"{format_publish_contact(c.get('contact'))}\n"
         f"\n\n🤖 *Хотите быстро найти подходящий груз?*\nНапишите боту: @tranzit\\_pro\\_bot"
-    )   
+    )
+
 
 @dp.message(LogisticianStates.single_message_input)
 async def process_single_message_cargo(message: types.Message, state: FSMContext):
     text = message.text.strip()
-    blocks = [b.strip() for b in text.split('\n\n') if b.strip()]
-    
+    blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
+
     if not blocks:
         await message.answer("Не удалось найти объявления. Попробуйте отправить ещё раз.")
         return
