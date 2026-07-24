@@ -35,7 +35,22 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
-from db import init_db, add_user, get_user_role, get_driver_id, get_logistician_id, add_cargo, get_cargo_by_route, get_logistician_cargo, add_vehicle, get_vehicles_by_route, get_driver_vehicles, add_subscription, get_subscribers_for_route
+from db import (
+    init_db,
+    add_user,
+    get_user_role,
+    get_driver_id,
+    get_logistician_id,
+    add_cargo,
+    get_cargo_by_route,
+    get_logistician_cargo,
+    add_vehicle,
+    get_vehicles_by_route,
+    get_driver_vehicles,
+    add_subscription,
+    get_subscribers_for_route,
+    count_vehicles,
+)
 
 CITY_FLAGS = {
     "Андижон": "🇺🇿", "Наманган": "🇺🇿", "Ташкент": "🇺🇿", "Самарканд": "🇺🇿", "Бухара": "🇺🇿", 
@@ -303,6 +318,35 @@ def get_country_keyboard():
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
 
+
+def get_cancel_keyboard():
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="❌ Отмена"))
+    return builder.as_markup(resize_keyboard=True)
+
+
+def _clean_city_input(text) -> str:
+    """Strip spaces and leading flag/emoji from a city typed by the user."""
+    if not text:
+        return ""
+    s = str(text).strip()
+    s = re.sub(r"^[^\wА-Яа-яЁё]+", "", s, flags=re.UNICODE).strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def format_vehicle_card(vehicle) -> str:
+    """vehicle row: id, driver_id, body_type, capacity, origin, destination, date, contact"""
+    return (
+        f"\n🚚 Тип кузова: {vehicle[2]}\n"
+        f"⚖️ Грузоподъёмность: {vehicle[3]} т\n"
+        f"📍 Откуда: {vehicle[4]}\n"
+        f"📍 Куда: {vehicle[5]}\n"
+        f"📅 Дата: {vehicle[6]}\n"
+        f"📞 Контакт: {vehicle[7]}\n"
+        f"---"
+    )
+
 # --- Handlers ---
 
 @dp.message(CommandStart())
@@ -467,12 +511,14 @@ async def driver_add_vehicle_contact(message: types.Message, state: FSMContext):
         await state.set_state(DriverStates.main_menu)
         return
     author_contact = resolve_author_contact(message.text, message.from_user)
+    origin_city = _clean_city_input(user_data['origin']) or str(user_data['origin']).strip()
+    dest_city = _clean_city_input(user_data['destination']) or str(user_data['destination']).strip()
     add_vehicle(
         driver_id,
         user_data['body_type'],
         float(capacity),
-        user_data['origin'],
-        user_data['destination'],
+        origin_city,
+        dest_city,
         user_data['date'],
         author_contact,
     )
@@ -480,8 +526,8 @@ async def driver_add_vehicle_contact(message: types.Message, state: FSMContext):
     await state.set_state(DriverStates.main_menu)
 
     # Auto-publish to channel
-    origin_f = f"{user_data.get('origin_flag', '')} {user_data['origin']}".strip()
-    dest_f = f"{user_data.get('destination_flag', '')} {user_data['destination']}".strip()
+    origin_f = f"{user_data.get('origin_flag', '')} {origin_city}".strip()
+    dest_f = f"{user_data.get('destination_flag', '')} {dest_city}".strip()
     channel_message = (
         f"🚚 *Свободная машина*\n\n"
         f"📍 *Откуда:* {escape_md(origin_f)}\n"
@@ -1051,27 +1097,91 @@ async def reject_single_msg_cargo(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "🚛 Найти свободные машины")
 async def search_vehicles_start(message: types.Message, state: FSMContext):
-    await message.answer("Введите город отправления:")
+    total = count_vehicles()
+    await message.answer(
+        "Введите *город отправления* (как в объявлении, например: Москва).\n"
+        f"Сейчас в базе машин: {total}",
+        reply_markup=get_cancel_keyboard(),
+        parse_mode="Markdown",
+    )
     await state.set_state(LogisticianStates.searching_vehicles_origin)
+
+
+@dp.message(LogisticianStates.searching_vehicles_origin, F.text == "❌ Отмена")
+@dp.message(LogisticianStates.searching_vehicles_destination, F.text == "❌ Отмена")
+async def search_vehicles_cancel(message: types.Message, state: FSMContext):
+    await message.answer("Поиск отменён.", reply_markup=get_logistician_main_keyboard())
+    await state.set_state(LogisticianStates.main_menu)
+
 
 @dp.message(LogisticianStates.searching_vehicles_origin)
 async def search_vehicles_origin(message: types.Message, state: FSMContext):
-    await state.update_data(search_origin=message.text)
-    await message.answer("Введите город назначения:")
+    origin = _clean_city_input(message.text)
+    if not origin:
+        await message.answer("Введите город отправления текстом, например: Москва")
+        return
+    # Don't treat main-menu buttons as a city if keyboard is still open
+    menu_labels = {
+        "📦 Разместить груз",
+        "🔍 Найти груз",
+        "🚛 Найти свободные машины",
+        "📋 Мои объявления",
+        "🔄 Сменить роль",
+        "🟢 Я водитель",
+        "🔵 Я логист",
+    }
+    if message.text and message.text.strip() in menu_labels:
+        await message.answer(
+            "Сначала введите город отправления или нажмите «❌ Отмена».",
+            reply_markup=get_cancel_keyboard(),
+        )
+        return
+    await state.update_data(search_origin=origin)
+    await message.answer(
+        "Введите *город назначения* (например: Ташкент):",
+        reply_markup=get_cancel_keyboard(),
+        parse_mode="Markdown",
+    )
     await state.set_state(LogisticianStates.searching_vehicles_destination)
+
 
 @dp.message(LogisticianStates.searching_vehicles_destination)
 async def search_vehicles_destination(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
-    origin = user_data['search_origin']
-    destination = message.text
+    origin = user_data.get("search_origin") or ""
+    destination = _clean_city_input(message.text)
+    if not destination:
+        await message.answer("Введите город назначения текстом, например: Ташкент")
+        return
+    if not origin:
+        await message.answer(
+            "Сессия поиска сброшена. Нажмите «🚛 Найти свободные машины» ещё раз.",
+            reply_markup=get_logistician_main_keyboard(),
+        )
+        await state.set_state(LogisticianStates.main_menu)
+        return
+
     vehicles = get_vehicles_by_route(origin, destination)
     if vehicles:
-        response = "Найденные машины:\n"
+        response = f"Найдены машины по маршруту {origin} → {destination}:\n"
         for vehicle in vehicles:
-            response += f"\nТип кузова: {vehicle[2]}\nГрузоподъёмность: {vehicle[3]} т\nОткуда: {vehicle[4]}\nКуда: {vehicle[5]}\nДата: {vehicle[6]}\nКонтакт: {vehicle[7]}\n---"
+            response += format_vehicle_card(vehicle)
     else:
-        response = "Машин по вашему направлению не найдено."
+        total = count_vehicles()
+        if total == 0:
+            response = (
+                "В базе пока нет ни одной свободной машины.\n"
+                "Объявления появляются, когда водители нажимают "
+                "«🚚 Разместить свободную машину» в боте "
+                "(посты только в канале в поиск не попадают)."
+            )
+        else:
+            response = (
+                f"Машин по маршруту {origin} → {destination} не найдено.\n"
+                f"Всего машин в базе: {total}.\n"
+                "Проверьте написание городов (регистр не важен) — "
+                "нужно то же направление, что указал водитель."
+            )
     await message.answer(response, reply_markup=get_logistician_main_keyboard())
     await state.set_state(LogisticianStates.main_menu)
 

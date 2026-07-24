@@ -1,4 +1,19 @@
 import sqlite3
+import re
+
+
+def _norm_city(value) -> str:
+    """Normalize city for route matching: trim, drop flags/emoji, casefold."""
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if not s:
+        return ""
+    # Drop leading emoji / flag / bullets (e.g. "🇷🇺 Москва")
+    s = re.sub(r"^[^\wА-Яа-яЁё]+", "", s, flags=re.UNICODE).strip()
+    s = re.sub(r"\s+", " ", s)
+    return s.casefold()
+
 
 def init_db():
     conn = sqlite3.connect('cargo_bot.db')
@@ -121,12 +136,19 @@ def add_cargo(logistician_id, origin, destination, cargo_type, weight, volume, p
     conn.close()
 
 def get_cargo_by_route(origin, destination):
+    """Match cargo by route; city compare is case-insensitive and trims flags/spaces."""
+    want_o, want_d = _norm_city(origin), _norm_city(destination)
+    if not want_o or not want_d:
+        return []
     conn = sqlite3.connect('cargo_bot.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM cargo WHERE origin = ? AND destination = ?', (origin, destination))
-    cargo = cursor.fetchall()
+    cursor.execute('SELECT * FROM cargo')
+    rows = cursor.fetchall()
     conn.close()
-    return cargo
+    return [
+        row for row in rows
+        if _norm_city(row[2]) == want_o and _norm_city(row[3]) == want_d
+    ]
 
 def get_all_cargo():
     conn = sqlite3.connect('cargo_bot.db')
@@ -155,12 +177,29 @@ def add_vehicle(driver_id, body_type, capacity, origin, destination, date, conta
     conn.close()
 
 def get_vehicles_by_route(origin, destination):
+    """Match vehicles by route; city compare is case-insensitive and trims flags/spaces."""
+    want_o, want_d = _norm_city(origin), _norm_city(destination)
+    if not want_o or not want_d:
+        return []
     conn = sqlite3.connect('cargo_bot.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM vehicles WHERE origin = ? AND destination = ?', (origin, destination))
-    vehicles = cursor.fetchall()
+    cursor.execute('SELECT * FROM vehicles')
+    rows = cursor.fetchall()
     conn.close()
-    return vehicles
+    return [
+        row for row in rows
+        if _norm_city(row[4]) == want_o and _norm_city(row[5]) == want_d
+    ]
+
+
+def count_vehicles():
+    conn = sqlite3.connect('cargo_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM vehicles')
+    n = cursor.fetchone()[0]
+    conn.close()
+    return n
+
 
 def get_all_vehicles():
     conn = sqlite3.connect('cargo_bot.db')
@@ -186,14 +225,20 @@ def add_subscription(driver_id, origin, destination):
     conn.close()
 
 def get_subscribers_for_route(origin, destination):
+    """Subscribers for a route; same city normalization as search."""
+    want_o, want_d = _norm_city(origin), _norm_city(destination)
+    if not want_o or not want_d:
+        return []
     conn = sqlite3.connect('cargo_bot.db')
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT d.telegram_id FROM subscriptions s
+        SELECT d.telegram_id, s.origin, s.destination FROM subscriptions s
         JOIN drivers d ON s.driver_id = d.id
-        WHERE s.origin = ? AND s.destination = ?
-    ''', (origin, destination))
-    subscribers = cursor.fetchall()
+    ''')
+    rows = cursor.fetchall()
     conn.close()
-    return [s[0] for s in subscribers]
+    return [
+        row[0] for row in rows
+        if _norm_city(row[1]) == want_o and _norm_city(row[2]) == want_d
+    ]
     
