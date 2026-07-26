@@ -53,12 +53,12 @@ from db import (
 )
 
 CITY_FLAGS = {
-    "Андижон": "🇺🇿", "Наманган": "🇺🇿", "Ташкент": "🇺🇿", "Самарканд": "🇺🇿", "Бухара": "🇺🇿", 
-    "Фергана": "🇺🇿", "Кашкадарё": "🇺🇿", "Сурхандарё": "🇺🇿", "Хорезм": "🇺🇿", "Навои": "🇺🇿", 
+    "Андижон": "🇺🇿", "Наманган": "🇺🇿", "Ташкент": "🇺🇿", "Самарканд": "🇺🇿", "Бухара": "🇺🇿",
+    "Фергана": "🇺🇿", "Кашкадарё": "🇺🇿", "Сурхандарё": "🇺🇿", "Хорезм": "🇺🇿", "Навои": "🇺🇿",
     "Джизак": "🇺🇿", "Сырдарья": "🇺🇿", "Каракалпакстан": "🇺🇿", "Охонгорон": "🇺🇿",
-    "Москва": "🇷🇺", "Санкт-Петербург": "🇷🇺", "Нижний Новгород": "🇷🇺", "Екатеринбург": "🇷🇺", 
-    "Новосибирск": "🇷🇺", "Казань": "🇷🇺", "Барнаул": "🇷🇺", "Челябинск": "🇷🇺", "Самара": "🇷🇺", 
-    "Ростов": "🇷🇺", "Краснодар": "🇷🇺", "Воронеж": "🇷🇺", "Волгоград": "🇷🇺", "Уфа": "🇷🇺", 
+    "Москва": "🇷🇺", "Санкт-Петербург": "🇷🇺", "Нижний Новгород": "🇷🇺", "Екатеринбург": "🇷🇺",
+    "Новосибирск": "🇷🇺", "Казань": "🇷🇺", "Барнаул": "🇷🇺", "Челябинск": "🇷🇺", "Самара": "🇷🇺",
+    "Ростов": "🇷🇺", "Краснодар": "🇷🇺", "Воронеж": "🇷🇺", "Волгоград": "🇷🇺", "Уфа": "🇷🇺",
     "Пермь": "🇷🇺", "Красноярск": "🇷🇺", "Омск": "🇷🇺", "Тюмень": "🇷🇺", "Заринск": "🇷🇺",
     "Алматы": "🇰🇿", "Астана": "🇰🇿", "Шымкент": "🇰🇿", "Караганда": "🇰🇿",
     "Бишкек": "🇰🇬", "Ош": "🇰🇬",
@@ -69,31 +69,64 @@ CITY_FLAGS = {
     "Варшава": "🇵🇱",
     "Стамбул": "🇹🇷", "Анкара": "🇹🇷",
     "Пекин": "🇨🇳", "Шанхай": "🇨🇳", "Урумчи": "🇨🇳", "Кашгар": "🇨🇳",
-    "Бейсик": "🇰🇿"
+    "Бейсик": "🇰🇿",
 }
+
+# Common misspellings / colloquial city names → canonical
+CITY_ALIASES = {
+    "алмата": "Алматы",
+    "алма-ата": "Алматы",
+    "алмаата": "Алматы",
+    "нур-султан": "Астана",
+    "нурсултан": "Астана",
+    "спб": "Санкт-Петербург",
+    "питер": "Санкт-Петербург",
+    "санкт петербург": "Санкт-Петербург",
+}
+
+
+def canonicalize_city(city_name: str) -> str:
+    """Normalize city spelling and strip trailing dashes/noise."""
+    if not city_name:
+        return "Не указано"
+    s = str(city_name).strip()
+    s = re.sub(r"^[^\wА-Яа-яЁё]+", "", s, flags=re.UNICODE).strip()
+    s = s.strip(" \t,;|.-–—")
+    s = re.sub(r"\s+", " ", s)
+    if not s:
+        return "Не указано"
+    alias = CITY_ALIASES.get(s.casefold())
+    if alias:
+        return alias
+    # Title-case known cities case-insensitively
+    for key in CITY_FLAGS:
+        if key.casefold() == s.casefold():
+            return key
+    return s
+
 
 def get_city_with_flag(city_name):
     if not city_name or city_name == "Не указано":
         return "Не указано"
-    
-    city = city_name.strip()
-    
-    # Точное совпадение
+
+    city = canonicalize_city(city_name)
+    if city == "Не указано":
+        return "Не указано"
+
     if city in CITY_FLAGS:
         return f"{CITY_FLAGS[city]} {city}"
-    
-    # Поиск без учёта регистра
-    city_lower = city.lower()
+
+    city_lower = city.casefold()
     for key, flag in CITY_FLAGS.items():
-        if key.lower() == city_lower:
-            return f"{flag} {city}"
-    
-    # Дополнительная логика по окончанию слова
+        if key.casefold() == city_lower:
+            return f"{flag} {key}"
+
+    # Fallback by typical endings
     if any(city_lower.endswith(x) for x in ["ск", "град", "бург", "ов", "ино", "ево", "ка", "ль", "мь"]):
         return f"🇷🇺 {city}"
     if any(city_lower.endswith(x) for x in ["он", "арё", "ат", "ент", "ан"]):
         return f"🇺🇿 {city}"
-    
+
     return city
 
 
@@ -735,17 +768,23 @@ async def logistician_add_cargo_contact(message: types.Message, state: FSMContex
 @dp.message(LogisticianStates.choosing_placement_mode, F.text == "Одним сообщением")
 async def logistician_add_cargo_single_msg(message: types.Message, state: FSMContext):
     await message.answer(
-    "Отправьте информацию о грузе **одним сообщением** в свободной форме.\n\n"
-    "**Пример:**\n"
-    "📍 Откуда: Алматы\n"
-    "📍 Куда: Ташкент\n"
-    "📦 Груз: Рулонная бумага\n"
-    "⚖️ Вес: 22 тонны\n"
-    "🚚 Кузов: Тент\n"
-    "💰 Фрахт: 1200$\n"
-    "📋 Условия: Наличные, перечисление, груз готов",
-    parse_mode="Markdown"
-)
+        "Отправьте информацию о грузе **одним сообщением** в свободной форме.\n\n"
+        "**Пример:**\n"
+        "🇰🇿 Алматы\n"
+        "🇺🇿 Ташкент\n"
+        "Груз энергетик\n"
+        "Вес 22 тонн\n"
+        "2 машины\n"
+        "тент реф +5\n"
+        "погрузка сверху сбоку\n"
+        "дата 25.07\n"
+        "Груз готов\n"
+        "Оплата нал 1200$\n\n"
+        "Можно и с подписями: Откуда / Куда / Груз / Вес / Кузов / "
+        "Кол-во машин / Дата погрузки / Погрузка (сверху/сбоку/сзади) / "
+        "Температура / Фрахт / Условия.",
+        parse_mode="Markdown",
+    )
     await state.set_state(LogisticianStates.single_message_input)
 
 @dp.message(LogisticianStates.choosing_placement_mode, F.text == "Назад")
@@ -756,7 +795,19 @@ async def logistician_add_cargo_back(message: types.Message, state: FSMContext):
 # Labels that start a new field in free-form cargo ads (used as stop markers).
 _CARGO_FIELD_LABELS = (
     "откуда", "куда", "груз", "тип груза", "вес", "кузов", "тип кузова",
-    "фрахт", "цена", "стоимость", "условия", "контакт", "телефон", "дата",
+    "фрахт", "цена", "стоимость", "оплата", "условия", "контакт", "телефон",
+    "дата", "дата погрузки", "погрузка", "способ погрузки", "машины",
+    "кол-во машин", "количество машин", "температура", "темп", "режим",
+    "температурный режим",
+)
+
+# Lines that look like field lines, not city names
+_CITY_LINE_SKIP = re.compile(
+    r"^(груз|вес|кузов|фрахт|цена|стоимость|оплата|условия|контакт|телефон|"
+    r"дата|погрузк|машин|кол[\-\s]?во|темп|режим|тент|реф|изотерм|борт|"
+    r"площадк|фур|налич|безнал|аванс|готов|срочн|сверху|сбоку|сзади|"
+    r"оплата|нал\b|перечисл)",
+    re.IGNORECASE,
 )
 
 
@@ -767,24 +818,26 @@ def _strip_field_noise(value: str) -> str:
     # Take only the first line so multi-line capture cannot leak other fields
     s = str(value).splitlines()[0].strip()
     # Drop leading location/package emoji and bullet markers
-    s = re.sub(r"^[\s📍🔹📦⚖️🚚💰📞🏷️📅\-•*]+", "", s)
+    s = re.sub(r"^[\s📍🔹📦⚖️🚚🚛💰📞🏷️📅🌡⬆️⬇️⬅️➡️\-•*]+", "", s)
     s = s.strip(" \t,;|")
     return s
 
 
 def _extract_labeled_field(text: str, labels) -> str:
-    """Extract value after 'Label:' up to end of line (never past the next field)."""
+    """Extract value after 'Label:' or 'Label ' up to end of line."""
     if not text:
         return ""
     for label in labels:
         # Optional emoji/bullet prefix before the label (📍 Откуда: …)
+        # Colon optional: "Груз энергетик", "Вес 22 тонн"
         pat = (
-            rf"(?:^|\n)\s*(?:[📍🔹📦⚖️🚚💰📞🏷️📅\-•*]+\s*)?"
-            rf"{re.escape(label)}\s*:\s*(.+?)(?:\s*$|\n)"
+            rf"(?:^|\n)\s*(?:[📍🔹📦⚖️🚚🚛💰📞🏷️📅🌡⬆️\-•*]+\s*)?"
+            rf"{re.escape(label)}\s*[:\-–—]?\s*(.+?)(?:\s*$|\n)"
         )
         m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
         if m:
             val = _strip_field_noise(m.group(1))
+            # Avoid treating bare "готов" line as cargo when matched via partial labels
             if val:
                 return val
     return ""
@@ -808,11 +861,41 @@ def _normalize_city_name(name: str) -> str:
             s = s[:idx].strip(" \t,;")
             lower = s.lower()
             break
-    s = s.strip(" \t,;")
-    return s or "Не указано"
+    s = s.strip(" \t,;.-–—")
+    return canonicalize_city(s)
+
+
+def _extract_route_from_city_lines(text: str):
+    """Parse multi-line free-form routes like:
+    🇰🇿 Алмата-
+    🇺🇿 Ташкент
+    """
+    found = []
+    for raw in text.splitlines():
+        s = re.sub(r"^[^\wА-Яа-яЁё]+", "", raw, flags=re.UNICODE).strip()
+        s = s.strip(" \t,;|.-–—")
+        if not s or _CITY_LINE_SKIP.search(s):
+            continue
+        # Single city token (optional second word: Нижний Новгород)
+        m = re.match(
+            r"^([А-ЯЁA-Z][а-яёa-zA-ZЁё\-]+(?:\s+[А-ЯЁA-Zа-яёa-zA-ZЁё\-]+)?)$",
+            s,
+        )
+        if not m:
+            continue
+        city = canonicalize_city(m.group(1))
+        if city != "Не указано":
+            found.append(city)
+        if len(found) >= 2:
+            break
+    if len(found) >= 2:
+        return found[0], found[1]
+    return "", ""
 
 
 def _guess_cargo_type(text_lower: str) -> str:
+    if "энергетик" in text_lower:
+        return "Энергетик"
     if "сахар" in text_lower:
         return "Сахар"
     if "тахта" in text_lower:
@@ -837,8 +920,189 @@ def _guess_cargo_type(text_lower: str) -> str:
         return "Масло"
     if "алюмин" in text_lower or "профиль" in text_lower:
         return "Алюминиевый профиль"
-    if "бор" in text_lower:
+    if "бор" in text_lower and "борт" not in text_lower:
         return "Бор"
+    if "мебел" in text_lower:
+        return "Мебель"
+    if "продукт" in text_lower or "еда" in text_lower or "пищев" in text_lower:
+        return "Продукты"
+    if "овощ" in text_lower or "фрукт" in text_lower:
+        return "Овощи/фрукты"
+    return "Не указано"
+
+
+def _parse_body_types(full_text: str, full_lower: str) -> str:
+    labeled = _extract_labeled_field(full_text, ("Кузов", "Тип кузова"))
+    bodies = []
+    src = (labeled + " " + full_lower).lower() if labeled else full_lower
+
+    checks = [
+        (r"реф(?:риж(?:ератор)?)?|рефриж", "Реф"),
+        (r"тент", "Тент"),
+        (r"изотерм", "Изотерм"),
+        (r"бортов|борт\b", "Борт"),
+        (r"площадк|открыт", "Площадка"),
+        (r"контейнер", "Контейнер"),
+        (r"цельнометалл|фургон", "Фургон"),
+    ]
+    for pat, name in checks:
+        if re.search(pat, src):
+            if name not in bodies:
+                bodies.append(name)
+
+    if labeled and not bodies:
+        # Keep free text from label if no known keywords
+        return labeled
+    if labeled and bodies:
+        # Prefer structured known types, append extra words from label if useful
+        return " / ".join(bodies)
+    return " / ".join(bodies) if bodies else "Не указано"
+
+
+def _parse_vehicles_count(full_text: str, full_lower: str) -> str:
+    labeled = _extract_labeled_field(
+        full_text,
+        ("Кол-во машин", "Количество машин", "Машины", "Кол-во", "Количество"),
+    )
+    if labeled:
+        m = re.search(r"(\d{1,2})", labeled)
+        if m:
+            return m.group(1)
+    m = re.search(
+        r"(\d{1,2})\s*(?:маш(?:ин[аыу]?)?|а/?м\b|авто|фур[аы]?|тс\b)",
+        full_lower,
+    )
+    if m:
+        return m.group(1)
+    m = re.search(
+        r"(?:кол[\-\s]?во|количество)\s*(?:маш(?:ин)?|а/?м|авто)?\s*[:\-]?\s*(\d{1,2})",
+        full_lower,
+    )
+    if m:
+        return m.group(1)
+    return "Не указано"
+
+
+def _parse_loading_date(full_text: str, full_lower: str) -> str:
+    labeled = _extract_labeled_field(
+        full_text,
+        ("Дата погрузки", "Дата готовности", "Дата"),
+    )
+    # "Погрузка: сверху" is a method, not a date — only accept if looks like a date
+    pog = _extract_labeled_field(full_text, ("Погрузка",))
+    if pog and re.search(
+        r"\d{1,2}[./]\d{1,2}|сегодня|завтра|послезавтра",
+        pog,
+        re.I,
+    ):
+        labeled = labeled or pog
+
+    # Reject method-only / payment-only false positives
+    if labeled and re.search(
+        r"сверху|сбоку|сзади|верхн|боков|задн|оплата|нал|фрахт|\$",
+        labeled,
+        re.I,
+    ):
+        # Still keep if it also contains a real date token
+        if not re.search(r"\d{1,2}[./]\d{1,2}|сегодня|завтра|послезавтра", labeled, re.I):
+            labeled = ""
+
+    candidates = []
+    if labeled:
+        candidates.append(labeled)
+    candidates.append(full_text)
+
+    for src in candidates:
+        m = re.search(
+            r"\b(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)\b",
+            src,
+        )
+        if m:
+            return m.group(1)
+        m = re.search(
+            r"\b(сегодня|завтра|послезавтра|ежедневно|каждый день)\b",
+            src,
+            re.IGNORECASE,
+        )
+        if m:
+            word = m.group(1)
+            return word[:1].upper() + word[1:].lower()
+
+    # Explicit "дата ..." on same line only (do not cross newlines via \s)
+    m = re.search(
+        r"(?:^|\n)\s*дата(?:[ \t]+погрузки)?[ \t]*[:\-–—]?[ \t]*([^\n,;]+)",
+        full_lower,
+    )
+    if m:
+        val = _strip_field_noise(m.group(1))
+        if val and not re.search(r"сверху|сбоку|сзади|оплата|нал|\$", val, re.I):
+            return val[:40]
+    return "Не указано"
+
+
+def _parse_loading_method(full_text: str, full_lower: str) -> str:
+    labeled = _extract_labeled_field(
+        full_text,
+        ("Способ погрузки", "Погрузка", "Загрузка"),
+    )
+    src = ((labeled or "") + " " + full_lower).lower()
+    methods = []
+    if re.search(r"сверху|верхн", src):
+        methods.append("сверху")
+    if re.search(r"сбоку|боков", src):
+        methods.append("сбоку")
+    if re.search(r"сзади|задн", src):
+        methods.append("сзади")
+    if methods:
+        return ", ".join(methods)
+    if labeled and not re.search(r"\d{1,2}[./]\d{1,2}", labeled):
+        # free text method without known keywords
+        low = labeled.lower()
+        if not re.search(r"сегодня|завтра|дата", low):
+            return labeled
+    return "Не указано"
+
+
+def _parse_temperature(full_text: str, full_lower: str, body: str) -> str:
+    """Temperature regime for reefer / explicit temp mentions."""
+    labeled = _extract_labeled_field(
+        full_text,
+        (
+            "Температурный режим",
+            "Температура",
+            "Темп. режим",
+            "Темп режим",
+            "Темп",
+            "Режим",
+        ),
+    )
+    if labeled:
+        # Keep as-is if has digits or +/ -
+        if re.search(r"\d|[+\-]", labeled):
+            t = labeled.strip()
+            if "°" not in t and re.search(r"\d", t):
+                t = re.sub(r"\s*c\s*$", "", t, flags=re.I).strip() + "°C"
+            return t
+
+    # Patterns: +5, -18, +2+5, +2...+5, +2 - +5, 0+5
+    patterns = [
+        r"(?:темп(?:ератур\w*)?(?:\s*режим)?|режим)\s*[:\-]?\s*"
+        r"([+\-]?\d{1,2}\s*(?:[.\-…~]+\s*[+\-]?\d{1,2})?)\s*°?\s*[cс]?",
+        r"([+\-]\d{1,2}\s*[.\-…~]+\s*[+\-]?\d{1,2})\s*°?\s*[cс]?",
+        r"([+\-]\d{1,2})\s*°\s*[cс]?",
+        r"([+\-]\d{1,2})\s*[cс]\b",
+        r"(?<![.\d])([+\-]\d{1,2})(?!\d)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, full_text, re.IGNORECASE)
+        if m:
+            t = re.sub(r"\s+", "", m.group(1))
+            t = t.replace("...", "-").replace("…", "-").replace("~", "-")
+            if "°" not in t:
+                t = t + "°C"
+            return t
+
+    # If reefer mentioned but no temp — leave unspecified
     return "Не указано"
 
 
@@ -860,7 +1124,8 @@ def parse_cargo_block(text):
         # Same-line: Откуда: X Куда: Y  (Y stops at newline or next known label)
         route = re.search(
             r"Откуда\s*:\s*(.+?)\s*Куда\s*:\s*(.+?)(?=\n|"
-            r"(?:Груз|Вес|Кузов|Фрахт|Цена|Стоимость|Условия|Контакт)\s*:|$)",
+            r"(?:Груз|Вес|Кузов|Фрахт|Цена|Стоимость|Условия|Контакт|"
+            r"Дата|Погрузка|Машин|Темп)\s*:|$)",
             full_text,
             re.IGNORECASE | re.DOTALL,
         )
@@ -871,10 +1136,10 @@ def parse_cargo_block(text):
                 destination = _strip_field_noise(route.group(2))
 
     if not origin or not destination:
-        # Free form: City → City / City - City
+        # Free form: City → City / City - City on one line
         alt_route = re.search(
             r"([А-ЯЁA-Z][а-яёa-zA-ZЁё\-]*(?:\s+[А-ЯЁA-Zа-яёa-zA-ZЁё\-]+)?)"
-            r"\s*[:\-→]+\s*"
+            r"\s*(?:→|->|:|\s[-–—]\s)\s*"
             r"([А-ЯЁA-Z][а-яёa-zA-ZЁё\-]*(?:\s+[А-ЯЁA-Zа-яёa-zA-ZЁё\-]+)?)",
             full_text,
         )
@@ -884,10 +1149,21 @@ def parse_cargo_block(text):
             if not destination:
                 destination = _strip_field_noise(alt_route.group(2))
 
+    # Multi-line free form: first city lines (Алмата- / Ташкент)
+    if not origin or not destination:
+        o2, d2 = _extract_route_from_city_lines(full_text)
+        if o2 and not origin:
+            origin = o2
+        if d2 and not destination:
+            destination = d2
+
     # First line with two city-like tokens (e.g. "Самарканд Ташкент")
     if not origin or not destination:
         first_line = full_text.splitlines()[0]
-        cities = re.findall(r"([А-ЯЁA-Z][а-яёa-zA-ZЁё\-]+(?:\s+[А-ЯЁA-Zа-яёa-zA-ZЁё\-]+)?)", first_line)
+        cities = re.findall(
+            r"([А-ЯЁA-Z][а-яёa-zA-ZЁё\-]+(?:\s+[А-ЯЁA-Zа-яёa-zA-ZЁё\-]+)?)",
+            first_line,
+        )
         if len(cities) >= 2:
             if not origin:
                 origin = _strip_field_noise(cities[0])
@@ -902,62 +1178,86 @@ def parse_cargo_block(text):
     weight_labeled = _extract_labeled_field(full_text, ("Вес",))
     weight_src = weight_labeled.lower() if weight_labeled else full_lower
     w = re.search(
-        r"(\d{1,3}(?:[.,]\d{1,2})?)(?:\s*-\s*(\d{1,3}(?:[.,]\d{1,2})?))?\s*(т|тонн|тонна|тонны|тн)",
+        r"(\d{1,3}(?:[.,]\d{1,2})?)(?:\s*-\s*(\d{1,3}(?:[.,]\d{1,2})?))?\s*"
+        r"(т|тонн|тонна|тонны|тн)\b",
         weight_src,
     )
     if w:
         if w.group(2):
-            weight = f"{w.group(1)}-{w.group(2)} т"
+            weight = f"{w.group(1).replace(',', '.')}–{w.group(2).replace(',', '.')} т"
         else:
-            weight = f"{w.group(1)} т"
+            weight = f"{w.group(1).replace(',', '.')} т"
 
     # --- Price / freight ---
     price = "Не указано"
-    price_labeled = _extract_labeled_field(full_text, ("Фрахт", "Цена", "Стоимость"))
-    price_src = price_labeled.lower() if price_labeled else full_lower
-    p_dollar = re.search(r"(\d{3,5})\s*\$", price_src if "$" in price_src else full_text)
+    price_labeled = _extract_labeled_field(
+        full_text, ("Фрахт", "Цена", "Стоимость", "Оплата")
+    )
+    p_dollar = re.search(r"(\d{3,5})\s*\$", full_text)
     if p_dollar:
         price = p_dollar.group(1) + "$"
     else:
-        p2 = re.search(r"(?:фрахт|цена|стоимость)\s*:?\s*(\d{3,5})", full_lower)
+        p2 = re.search(
+            r"(?:фрахт|цена|стоимость|оплата)\s*[:\-]?\s*(?:нал(?:ичн\w*)?\s*)?(\d{3,5})",
+            full_lower,
+        )
         if p2:
             price = p2.group(1) + "$"
         elif price_labeled and re.search(r"\d{3,5}", price_labeled):
             price = re.search(r"(\d{3,5})", price_labeled).group(1) + "$"
 
-    # --- Body type: prefer full labeled value (e.g. "Тент фура КК") ---
-    body = _extract_labeled_field(full_text, ("Кузов", "Тип кузова"))
-    if not body:
-        if "тент" in full_lower:
-            body = "Тент"
-        elif "реф" in full_lower:
-            body = "Реф"
-        else:
-            body = "Не указано"
+    # --- Body type(s) ---
+    body = _parse_body_types(full_text, full_lower)
+
+    # --- Temperature (esp. for reefer) ---
+    temperature = _parse_temperature(full_text, full_lower, body)
+
+    # --- Vehicles count ---
+    vehicles_count = _parse_vehicles_count(full_text, full_lower)
+
+    # --- Loading date & method ---
+    loading_date = _parse_loading_date(full_text, full_lower)
+    loading_method = _parse_loading_method(full_text, full_lower)
 
     # --- Cargo: prefer labeled value, else keyword guess ---
     cargo = _extract_labeled_field(full_text, ("Груз", "Тип груза"))
+    # Avoid swallowing "Груз готов" as cargo type
+    if cargo and re.fullmatch(r"готов\w*", cargo.strip(), re.IGNORECASE):
+        cargo = ""
+    if cargo:
+        # Cut trailing condition words
+        cargo = re.split(
+            r"\b(?:готов|нал|оплата|тент|реф|вес)\b",
+            cargo,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip(" \t,;.-")
     if not cargo:
         cargo = _guess_cargo_type(full_lower)
     else:
         guessed = _guess_cargo_type(cargo.lower())
         if guessed != "Не указано":
             cargo = guessed
+        else:
+            # Title-case short free text
+            cargo = cargo.strip()
+            if cargo and cargo[0].islower():
+                cargo = cargo[0].upper() + cargo[1:]
 
-    # --- Conditions ---
+    # --- Conditions / payment ---
     conditions = []
-    conditions_labeled = _extract_labeled_field(full_text, ("Условия",))
-    cond_src = conditions_labeled.lower() if conditions_labeled else full_lower
+    conditions_labeled = _extract_labeled_field(full_text, ("Условия", "Оплата"))
+    cond_src = (conditions_labeled.lower() + " " + full_lower) if conditions_labeled else full_lower
 
     if "аванс" in cond_src:
         conditions.append("Аванс")
-    if "налич" in cond_src:
+    if re.search(r"\bнал(?:ичн\w*)?\b", cond_src) or "налич" in cond_src:
         conditions.append("Наличные")
     if "перечисл" in cond_src or "безнал" in cond_src:
         conditions.append("Перечисление")
     if "срочно" in cond_src:
         conditions.append("Срочно")
-    if "готов" in cond_src:
+    if re.search(r"груз\s*готов|готов\b", cond_src):
         conditions.append("Груз готов")
 
     if conditions_labeled and conditions_labeled.lower() in ("не указано", "-", "нет", "—"):
@@ -971,6 +1271,10 @@ def parse_cargo_block(text):
         "cargo": cargo,
         "weight_str": weight,
         "body": body,
+        "temperature": temperature,
+        "vehicles_count": vehicles_count,
+        "loading_date": loading_date,
+        "loading_method": loading_method,
         "conditions": conditions_str,
         "price": price,
         "contact": contact,
@@ -981,17 +1285,35 @@ def format_cargo_message(c):
     origin_with_flag = get_city_with_flag(c.get("origin", "Не указано"))
     dest_with_flag = get_city_with_flag(c.get("destination", "Не указано"))
 
-    return (
-        f"🔹 *Откуда:* {escape_md(origin_with_flag)}\n"
-        f"🔹 *Куда:* {escape_md(dest_with_flag)}\n"
-        f"📦 *Груз:* {escape_md(c.get('cargo', 'Не указано'))}\n"
-        f"⚖️ *Вес:* {escape_md(c.get('weight_str', 'Не указано'))}\n"
-        f"🚚 *Кузов:* {escape_md(c.get('body', 'Не указано'))}\n"
-        f"💰 *Фрахт:* {escape_md(c.get('price', 'Не указано'))}\n"
-        f"🔹 *Условия:* {escape_md(c.get('conditions', 'Не указано'))}\n\n"
-        f"{format_publish_contact(c.get('contact'))}\n"
-        f"\n\n🤖 *Хотите быстро найти подходящий груз?*\nНапишите боту: @tranzit\\_pro\\_bot"
+    lines = [
+        f"🔹 *Откуда:* {escape_md(origin_with_flag)}",
+        f"🔹 *Куда:* {escape_md(dest_with_flag)}",
+        f"📦 *Груз:* {escape_md(c.get('cargo', 'Не указано'))}",
+        f"⚖️ *Вес:* {escape_md(c.get('weight_str', 'Не указано'))}",
+        f"🚛 *Кол-во машин:* {escape_md(c.get('vehicles_count', 'Не указано'))}",
+        f"🚚 *Кузов:* {escape_md(c.get('body', 'Не указано'))}",
+    ]
+
+    body = (c.get("body") or "").lower()
+    temperature = c.get("temperature") or "Не указано"
+    # Always show temp for reefer; also if explicitly parsed
+    if temperature != "Не указано" or "реф" in body:
+        lines.append(f"🌡 *Темп. режим:* {escape_md(temperature)}")
+
+    lines.extend(
+        [
+            f"📅 *Дата погрузки:* {escape_md(c.get('loading_date', 'Не указано'))}",
+            f"⬆️ *Погрузка:* {escape_md(c.get('loading_method', 'Не указано'))}",
+            f"💰 *Фрахт:* {escape_md(c.get('price', 'Не указано'))}",
+            f"🔹 *Условия:* {escape_md(c.get('conditions', 'Не указано'))}",
+            "",
+            format_publish_contact(c.get("contact")),
+            "",
+            "🤖 *Хотите быстро найти подходящий груз?*",
+            "Напишите боту: @tranzit\\_pro\\_bot",
+        ]
     )
+    return "\n".join(lines)
 
 
 @dp.message(LogisticianStates.single_message_input)
@@ -1054,6 +1376,7 @@ async def confirm_single_msg_cargo(message: types.Message, state: FSMContext):
             message.from_user,
         )
         c['contact'] = user_contact
+        loading_date = c.get("loading_date") or "Не указано"
         add_cargo(
             logistician_id,
             c['origin'],
@@ -1062,7 +1385,7 @@ async def confirm_single_msg_cargo(message: types.Message, state: FSMContext):
             weight_val,
             0,
             c.get('price', 'Не указано'),
-            "В описании",
+            loading_date,
             user_contact,
         )
 
