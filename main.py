@@ -82,7 +82,17 @@ CITY_ALIASES = {
     "спб": "Санкт-Петербург",
     "питер": "Санкт-Петербург",
     "санкт петербург": "Санкт-Петербург",
+    "югра": "Югра",
+    "хмао": "ХМАО",
+    "ханты-мансийск": "Ханты-Мансийск",
 }
+
+# Words that must never be treated as city names in free-form route parsing
+_ROUTE_LABEL_BLOCKLIST = frozenset({
+    "груз", "вес", "кузов", "фрахт", "цена", "стоимость", "оплата", "условия",
+    "контакт", "телефон", "дата", "погрузка", "загрузка", "машины", "откуда",
+    "куда", "темп", "температура", "режим", "тип", "кол-во", "количество",
+})
 
 
 def canonicalize_city(city_name: str) -> str:
@@ -105,6 +115,21 @@ def canonicalize_city(city_name: str) -> str:
     return s
 
 
+def _city_flag_lookup_keys(city: str):
+    """Yield name variants used to resolve a flag (full, base, parenthetical)."""
+    yield city
+    # "Ташкент (Назарбек)" → base "Ташкент", note "Назарбек"
+    m = re.match(r"^(.+?)\s*\(([^)]+)\)\s*$", city)
+    if m:
+        yield m.group(1).strip()
+        yield m.group(2).strip()
+    # "АО (Югра)" / bare region names
+    for part in re.split(r"[\s,/]+", city):
+        part = part.strip("() ")
+        if part and len(part) > 1:
+            yield part
+
+
 def get_city_with_flag(city_name):
     if not city_name or city_name == "Не указано":
         return "Не указано"
@@ -116,15 +141,26 @@ def get_city_with_flag(city_name):
     if city in CITY_FLAGS:
         return f"{CITY_FLAGS[city]} {city}"
 
-    city_lower = city.casefold()
-    for key, flag in CITY_FLAGS.items():
-        if key.casefold() == city_lower:
-            return f"{flag} {key}"
+    for key_candidate in _city_flag_lookup_keys(city):
+        cand = canonicalize_city(key_candidate)
+        if cand in CITY_FLAGS:
+            return f"{CITY_FLAGS[cand]} {city}"
+        cand_lower = cand.casefold()
+        for key, flag in CITY_FLAGS.items():
+            if key.casefold() == cand_lower:
+                return f"{flag} {city}"
 
-    # Fallback by typical endings
-    if any(city_lower.endswith(x) for x in ["ск", "град", "бург", "ов", "ино", "ево", "ка", "ль", "мь"]):
+    city_lower = city.casefold()
+    # Russian regions / abbreviations often used as origin (АО Югра, ХМАО, …)
+    if re.search(r"\b(югра|хмао|янао|ао)\b", city_lower):
         return f"🇷🇺 {city}"
-    if any(city_lower.endswith(x) for x in ["он", "арё", "ат", "ент", "ан"]):
+
+    # Fallback by typical endings (use base name without parentheses)
+    base = re.sub(r"\s*\([^)]*\)\s*$", "", city).strip() or city
+    base_lower = base.casefold()
+    if any(base_lower.endswith(x) for x in ["ск", "град", "бург", "ов", "ино", "ево", "ка", "ль", "мь"]):
+        return f"🇷🇺 {city}"
+    if any(base_lower.endswith(x) for x in ["он", "арё", "ат", "ент", "ан"]):
         return f"🇺🇿 {city}"
 
     return city
@@ -865,26 +901,57 @@ def _normalize_city_name(name: str) -> str:
     return canonicalize_city(s)
 
 
+def _looks_like_route_place(name: str) -> bool:
+    """True if token is a place, not a field label like 'Груз' / 'Вес'."""
+    if not name:
+        return False
+    base = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
+    raw = base or name
+    low = raw.casefold()
+    if low in _ROUTE_LABEL_BLOCKLIST:
+        return False
+    # Reject pure numbers / prices
+    if re.fullmatch(r"[\d\s.,$]+", raw):
+        return False
+    return True
+
+
 def _extract_route_from_city_lines(text: str):
     """Parse multi-line free-form routes like:
     🇰🇿 Алмата-
     🇺🇿 Ташкент
+    🇷🇺  АО (Югра)
+    🇺🇿 Ташкент (Назарбек)
     """
     found = []
+    # Place line: 1–4 words (incl. ALL-CAPS abbr like АО/ХМАО),
+    # optional trailing (district/region note): "Ташкент (Назарбек)"
+    _w = r"[А-ЯЁA-Za-zа-яё0-9][А-ЯЁA-Za-zа-яё0-9\-]*"
+    place_re = re.compile(
+        rf"^({_w}(?:\s+{_w}){{0,3}}(?:\s*\([^)]+\))?)$"
+    )
     for raw in text.splitlines():
         s = re.sub(r"^[^\wА-Яа-яЁё]+", "", raw, flags=re.UNICODE).strip()
         s = s.strip(" \t,;|.-–—")
         if not s or _CITY_LINE_SKIP.search(s):
             continue
-        # Single city token (optional second word: Нижний Новгород)
-        m = re.match(
-            r"^([А-ЯЁA-Z][а-яёa-zA-ZЁё\-]+(?:\s+[А-ЯЁA-Zа-яёa-zA-ZЁё\-]+)?)$",
+        # Skip explicit "Label: value" lines — those are fields, not cities
+        if re.match(
+            r"^(?:откуда|куда|груз|вес|кузов|фрахт|цена|стоимость|оплата|"
+            r"условия|контакт|телефон|дата|погрузка|загрузка|машин|"
+            r"темп|режим|кол[\-\s]?во)\s*[:\-–—]",
             s,
-        )
+            re.IGNORECASE,
+        ):
+            continue
+        m = place_re.match(s)
         if not m:
             continue
-        city = canonicalize_city(m.group(1))
-        if city != "Не указано":
+        place = m.group(1).strip()
+        if not _looks_like_route_place(place):
+            continue
+        city = canonicalize_city(place)
+        if city != "Не указано" and _looks_like_route_place(city):
             found.append(city)
         if len(found) >= 2:
             break
@@ -1136,20 +1203,27 @@ def parse_cargo_block(text):
                 destination = _strip_field_noise(route.group(2))
 
     if not origin or not destination:
-        # Free form: City → City / City - City on one line
+        # Free form: City → City / City - City on one line.
+        # Do NOT treat bare "Label: value" (Груз: Тахта) as a route —
+        # colon is only a route separator when left side is not a field label.
+        _w = r"[А-ЯЁA-Za-zа-яё0-9][А-ЯЁA-Za-zа-яё0-9\-]*"
         alt_route = re.search(
-            r"([А-ЯЁA-Z][а-яёa-zA-ZЁё\-]*(?:\s+[А-ЯЁA-Zа-яёa-zA-ZЁё\-]+)?)"
-            r"\s*(?:→|->|:|\s[-–—]\s)\s*"
-            r"([А-ЯЁA-Z][а-яёa-zA-ZЁё\-]*(?:\s+[А-ЯЁA-Zа-яёa-zA-ZЁё\-]+)?)",
+            rf"({_w}(?:\s+{_w})?(?:\s*\([^)]+\))?)"
+            rf"\s*(?:→|->|\s[-–—]\s)\s*"
+            rf"({_w}(?:\s+{_w})?(?:\s*\([^)]+\))?)",
             full_text,
         )
         if alt_route:
-            if not origin:
-                origin = _strip_field_noise(alt_route.group(1))
-            if not destination:
-                destination = _strip_field_noise(alt_route.group(2))
+            o_cand = _strip_field_noise(alt_route.group(1))
+            d_cand = _strip_field_noise(alt_route.group(2))
+            if _looks_like_route_place(o_cand) and _looks_like_route_place(d_cand):
+                if not origin:
+                    origin = o_cand
+                if not destination:
+                    destination = d_cand
 
-    # Multi-line free form: first city lines (Алмата- / Ташкент)
+    # Multi-line free form: first place lines (Алмата- / Ташкент / АО (Югра))
+    # Prefer this over "first line two tokens" so parenthetical places win.
     if not origin or not destination:
         o2, d2 = _extract_route_from_city_lines(full_text)
         if o2 and not origin:
@@ -1160,10 +1234,12 @@ def parse_cargo_block(text):
     # First line with two city-like tokens (e.g. "Самарканд Ташкент")
     if not origin or not destination:
         first_line = full_text.splitlines()[0]
+        _w = r"[А-ЯЁA-Za-zа-яё0-9][А-ЯЁA-Za-zа-яё0-9\-]*"
         cities = re.findall(
-            r"([А-ЯЁA-Z][а-яёa-zA-ZЁё\-]+(?:\s+[А-ЯЁA-Zа-яёa-zA-ZЁё\-]+)?)",
+            rf"({_w}(?:\s+{_w})?(?:\s*\([^)]+\))?)",
             first_line,
         )
+        cities = [c for c in cities if _looks_like_route_place(c)]
         if len(cities) >= 2:
             if not origin:
                 origin = _strip_field_noise(cities[0])
@@ -1172,6 +1248,10 @@ def parse_cargo_block(text):
 
     origin = _normalize_city_name(origin) if origin else "Не указано"
     destination = _normalize_city_name(destination) if destination else "Не указано"
+    if not _looks_like_route_place(origin):
+        origin = "Не указано"
+    if not _looks_like_route_place(destination):
+        destination = "Не указано"
 
     # --- Weight ---
     weight = "Не указано"
@@ -1188,23 +1268,55 @@ def parse_cargo_block(text):
         else:
             weight = f"{w.group(1).replace(',', '.')} т"
 
-    # --- Price / freight ---
+    # --- Price / freight (keep dual rates: 3300$ (реф) / 3400$ (тент)) ---
     price = "Не указано"
     price_labeled = _extract_labeled_field(
         full_text, ("Фрахт", "Цена", "Стоимость", "Оплата")
     )
-    p_dollar = re.search(r"(\d{3,5})\s*\$", full_text)
-    if p_dollar:
-        price = p_dollar.group(1) + "$"
-    else:
-        p2 = re.search(
-            r"(?:фрахт|цена|стоимость|оплата)\s*[:\-]?\s*(?:нал(?:ичн\w*)?\s*)?(\d{3,5})",
-            full_lower,
-        )
-        if p2:
-            price = p2.group(1) + "$"
-        elif price_labeled and re.search(r"\d{3,5}", price_labeled):
+    # Reject pure payment method labels ("нал", "безнал") without digits
+    if price_labeled and not re.search(r"\d", price_labeled):
+        price_labeled = ""
+
+    def _normalize_freight(raw: str) -> str:
+        s = re.sub(r"\s+", " ", raw).strip(" \t,;|")
+        # Ensure $ sticks to the number: "3300 $" → "3300$"
+        s = re.sub(r"(\d)\s+\$", r"\1$", s)
+        return s
+
+    dual_freight = re.compile(
+        r"(\d{3,5}\s*\$\s*(?:\([^)]+\))?\s*/\s*\d{3,5}\s*\$\s*(?:\([^)]+\))?)",
+        re.IGNORECASE,
+    )
+    single_freight = re.compile(r"(\d{3,5})\s*\$")
+
+    if price_labeled:
+        dual = dual_freight.search(price_labeled)
+        if dual:
+            price = _normalize_freight(dual.group(1))
+        elif single_freight.search(price_labeled):
+            # Keep full labeled value when notes present: "3300$ (реф)"
+            if re.search(r"\(|реф|тент|/|или", price_labeled, re.I):
+                price = _normalize_freight(price_labeled)
+            else:
+                price = single_freight.search(price_labeled).group(1) + "$"
+        elif re.search(r"\d{3,5}", price_labeled):
             price = re.search(r"(\d{3,5})", price_labeled).group(1) + "$"
+    if price == "Не указано":
+        dual = dual_freight.search(full_text)
+        if dual:
+            price = _normalize_freight(dual.group(1))
+        else:
+            p_dollar = single_freight.search(full_text)
+            if p_dollar:
+                price = p_dollar.group(1) + "$"
+            else:
+                p2 = re.search(
+                    r"(?:фрахт|цена|стоимость|оплата)\s*[:\-]?\s*"
+                    r"(?:нал(?:ичн\w*)?\s*)?(\d{3,5})",
+                    full_lower,
+                )
+                if p2:
+                    price = p2.group(1) + "$"
 
     # --- Body type(s) ---
     body = _parse_body_types(full_text, full_lower)
@@ -1516,6 +1628,10 @@ async def echo_handler(message: types.Message):
 
 async def main():
     init_db()
+    # Ensure polling mode: drop any leftover webhook and stale updates
+    # (does not fix two simultaneous polling instances with the same token)
+    await bot.delete_webhook(drop_pending_updates=True)
+    logging.info("Webhook cleared, starting polling")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
