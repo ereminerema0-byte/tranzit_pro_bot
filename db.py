@@ -125,30 +125,126 @@ def get_logistician_id(telegram_id):
     conn.close()
     return logistician_id[0] if logistician_id else None
 
+def _norm_text(value) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip()).casefold()
+
+
+def _norm_contact(value) -> str:
+    return _norm_text(value).lstrip("@")
+
+
+def _norm_number(value):
+    """Normalize weight/volume for comparison (24, 24.0, '24.0' → same)."""
+    if value is None or value == "":
+        return 0.0
+    try:
+        return round(float(value), 3)
+    except (TypeError, ValueError):
+        return _norm_text(value)
+
+
+def _cargo_content_key(row) -> tuple:
+    """Identity of an ad without contact: route + type + size + price + date.
+
+    row: id, logistician_id, origin, destination, cargo_type, weight, volume, price, date, contact
+    """
+    return (
+        _norm_city(row[2]),
+        _norm_city(row[3]),
+        _norm_text(row[4]),
+        _norm_number(row[5]),
+        _norm_number(row[6]),
+        _norm_text(row[7]),
+        _norm_text(row[8]),
+    )
+
+
+def _dedupe_cargo_rows(rows):
+    """Collapse duplicate search hits into one card; merge different contacts.
+
+    Same route/type/weight/price/date posted twice (or by two accounts) used to
+    show as two almost identical blocks — that looked like repetition.
+    """
+    groups = {}
+    order = []
+    for row in rows:
+        key = _cargo_content_key(row)
+        contact = str(row[9]).strip() if row[9] is not None else ""
+        if key not in groups:
+            groups[key] = [list(row), []]
+            order.append(key)
+        base, contacts = groups[key]
+        # Keep the newest row as the display base
+        if row[0] is not None and (base[0] is None or row[0] > base[0]):
+            groups[key][0] = list(row)
+            base = groups[key][0]
+        if contact:
+            seen = {_norm_contact(c) for c in contacts}
+            if _norm_contact(contact) not in seen:
+                contacts.append(contact)
+    result = []
+    for key in order:
+        base, contacts = groups[key]
+        if contacts:
+            base[9] = ", ".join(contacts)
+        result.append(tuple(base))
+    return result
+
+
 def add_cargo(logistician_id, origin, destination, cargo_type, weight, volume, price, date, contact):
+    """Insert cargo; skip exact duplicates from the same logistician (double-tap / re-post)."""
     conn = sqlite3.connect('cargo_bot.db')
     cursor = conn.cursor()
+    new_row = (
+        None,
+        logistician_id,
+        origin,
+        destination,
+        cargo_type,
+        weight,
+        volume,
+        price,
+        date,
+        contact,
+    )
+    new_key = _cargo_content_key(new_row)
+    new_contact = _norm_contact(contact)
+    cursor.execute('SELECT * FROM cargo WHERE logistician_id = ?', (logistician_id,))
+    for row in cursor.fetchall():
+        if _cargo_content_key(row) == new_key and _norm_contact(row[9]) == new_contact:
+            conn.close()
+            return row[0]
     cursor.execute(
         'INSERT INTO cargo (logistician_id, origin, destination, cargo_type, weight, volume, price, date, contact) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         (logistician_id, origin, destination, cargo_type, weight, volume, price, date, contact)
     )
+    cargo_id = cursor.lastrowid
     conn.commit()
     conn.close()
+    return cargo_id
+
 
 def get_cargo_by_route(origin, destination):
-    """Match cargo by route; city compare is case-insensitive and trims flags/spaces."""
+    """Match cargo by route; city compare is case-insensitive and trims flags/spaces.
+
+    Near-duplicate ads (same content, different contacts) are merged into one row
+    so «Найти груз» does not print the same card twice.
+    """
     want_o, want_d = _norm_city(origin), _norm_city(destination)
     if not want_o or not want_d:
         return []
     conn = sqlite3.connect('cargo_bot.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM cargo')
+    cursor.execute('SELECT * FROM cargo ORDER BY id DESC')
     rows = cursor.fetchall()
     conn.close()
-    return [
+    matched = [
         row for row in rows
         if _norm_city(row[2]) == want_o and _norm_city(row[3]) == want_d
     ]
+    return _dedupe_cargo_rows(matched)
 
 def get_all_cargo():
     conn = sqlite3.connect('cargo_bot.db')
