@@ -10,11 +10,54 @@ logging.basicConfig(level=logging.INFO)
 # Bot configuration
 TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@tranzitpro1")
+# Public @username of the channel for user-facing messages (optional).
+# If empty, bot tries CHANNEL_ID when it looks like @name, else getChat.
+CHANNEL_USERNAME = (os.getenv("CHANNEL_USERNAME") or "").strip()
+# Min unique channel invites required before a non-admin can post ads.
+try:
+    MIN_CHANNEL_INVITES = max(0, int((os.getenv("MIN_CHANNEL_INVITES") or "5").strip()))
+except ValueError:
+    MIN_CHANNEL_INVITES = 5
+# Set POST_REQUIREMENTS_ENABLED=0 to temporarily disable the gate.
+POST_REQUIREMENTS_ENABLED = (os.getenv("POST_REQUIREMENTS_ENABLED") or "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 # Ads always show the contact of the person who posted.
 # CONTACT_USERNAME is intentionally NOT used in announcements (was wrongly
 # substituting one fixed hub username for every cargo). Kept only so old
 # Railway env vars do not break process startup.
 CONTACT_USERNAME = (os.getenv("CONTACT_USERNAME") or "").strip()
+
+# Manual payment for cargo ads (logisticians only). Admin confirms transfer.
+def _parse_admin_id(raw):
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        logging.error("ADMIN_ID должен быть числом (Telegram user id), получено: %r", raw)
+        return None
+
+
+ADMIN_ID = _parse_admin_id(os.getenv("ADMIN_ID"))
+# Price for ONE cargo ad. Multi-ad batch = count × this label (same unit text).
+AD_POST_PRICE = (os.getenv("AD_POST_PRICE") or "50 000 сум").strip()
+# Bank/card/phone details shown to the logistician before publish.
+PAYMENT_DETAILS = (
+    os.getenv("PAYMENT_DETAILS")
+    or "Уточните реквизиты у администратора бота."
+).strip()
+# Set PAYMENT_ENABLED=0 to temporarily allow free cargo posts for everyone.
+PAYMENT_ENABLED = (os.getenv("PAYMENT_ENABLED") or "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 
 # Fail-fast: do not start without a valid bot token
 if not TOKEN or not str(TOKEN).strip():
@@ -28,11 +71,18 @@ if not os.getenv("CHANNEL_ID"):
         CHANNEL_ID,
     )
 
+if PAYMENT_ENABLED and ADMIN_ID is None:
+    logging.warning(
+        "Оплата за грузы включена, но ADMIN_ID не задан — "
+        "подтверждать переводы будет некому. Задайте ADMIN_ID в env."
+    )
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 from db import (
@@ -50,6 +100,15 @@ from db import (
     add_subscription,
     get_subscribers_for_route,
     count_vehicles,
+    create_pending_ad,
+    get_pending_ad,
+    update_pending_ad_status,
+    list_pending_ads_for_admin,
+    get_user_invite_link_row,
+    save_user_invite_link,
+    get_inviter_by_link_name,
+    get_invite_count,
+    record_channel_invite,
 )
 
 CITY_FLAGS = {
@@ -303,6 +362,483 @@ def build_cargo_subscriber_notice(
     )
 
 
+def is_admin(user_id) -> bool:
+    return ADMIN_ID is not None and user_id == ADMIN_ID
+
+
+def payment_required_for(user_id) -> bool:
+    """Cargo ads are paid unless payment is off or the poster is admin."""
+    if not PAYMENT_ENABLED:
+        return False
+    if is_admin(user_id):
+        return False
+    if ADMIN_ID is None:
+        # Nobody can confirm payments — do not block users.
+        return False
+    return True
+
+
+# --- Post-ad requirements: channel subscription + N invites ---
+
+_MEMBER_STATUSES = frozenset({"member", "administrator", "creator", "restricted"})
+_LEFT_STATUSES = frozenset({"left", "kicked"})
+_channel_label_cache = None
+
+
+def _normalize_channel_username(raw: str) -> str:
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if s.startswith("https://t.me/"):
+        s = s[len("https://t.me/") :]
+    elif s.startswith("t.me/"):
+        s = s[len("t.me/") :]
+    s = s.strip().lstrip("@").split("/")[0].split("?")[0]
+    return f"@{s}" if s else ""
+
+
+def channel_label_sync() -> str:
+    """Best-effort channel name without API (for early messages)."""
+    if CHANNEL_USERNAME:
+        return _normalize_channel_username(CHANNEL_USERNAME) or CHANNEL_USERNAME
+    ch = str(CHANNEL_ID or "").strip()
+    if ch.startswith("@"):
+        return ch
+    return "канал"
+
+
+async def get_channel_label() -> str:
+    """Human-facing channel name: @username or title."""
+    global _channel_label_cache
+    if _channel_label_cache:
+        return _channel_label_cache
+    label = channel_label_sync()
+    if label.startswith("@"):
+        _channel_label_cache = label
+        return label
+    try:
+        chat = await bot.get_chat(CHANNEL_ID)
+        if getattr(chat, "username", None):
+            label = f"@{chat.username}"
+        elif getattr(chat, "title", None):
+            label = chat.title
+    except Exception as e:
+        logging.warning("Could not resolve channel label: %s", e)
+    _channel_label_cache = label
+    return label
+
+
+def channel_url_for_button(label: str) -> str | None:
+    """Public t.me URL if we know @username."""
+    if label and label.startswith("@") and len(label) > 1:
+        return f"https://t.me/{label[1:]}"
+    uname = _normalize_channel_username(CHANNEL_USERNAME)
+    if uname:
+        return f"https://t.me/{uname[1:]}"
+    ch = str(CHANNEL_ID or "").strip()
+    if ch.startswith("@"):
+        return f"https://t.me/{ch[1:]}"
+    return None
+
+
+def _member_status_value(member) -> str:
+    status = getattr(member, "status", None)
+    if status is None:
+        return ""
+    return status.value if hasattr(status, "value") else str(status)
+
+
+async def is_user_subscribed(user_id) -> bool:
+    """True if user is a member of CHANNEL_ID (or admin/creator)."""
+    try:
+        member = await bot.get_chat_member(CHANNEL_ID, user_id)
+        return _member_status_value(member) in _MEMBER_STATUSES
+    except Exception as e:
+        logging.warning("get_chat_member failed for %s: %s", user_id, e)
+        return False
+
+
+def invite_link_name_for(user_id: int) -> str:
+    # Telegram invite link name max length is 32
+    return f"ref{user_id}"[:32]
+
+
+async def get_or_create_invite_link(user_id: int) -> str | None:
+    """Personal channel invite link for tracking who invited whom."""
+    row = get_user_invite_link_row(user_id)
+    if row and row.get("invite_link"):
+        return row["invite_link"]
+    name = invite_link_name_for(user_id)
+    try:
+        link = await bot.create_chat_invite_link(
+            chat_id=CHANNEL_ID,
+            name=name,
+            creates_join_request=False,
+        )
+        url = link.invite_link
+        save_user_invite_link(user_id, url, name)
+        return url
+    except Exception as e:
+        logging.error(
+            "Failed to create invite link for %s (bot must be channel admin "
+            "with invite permission): %s",
+            user_id,
+            e,
+        )
+        return None
+
+
+def format_post_requirements_text(
+    *,
+    subscribed: bool,
+    invites: int,
+    channel: str,
+    invite_link: str | None = None,
+) -> str:
+    """Clear Russian message when post requirements are not met."""
+    need = MIN_CHANNEL_INVITES
+    sub_mark = "✅" if subscribed else "❌"
+    inv_ok = invites >= need
+    inv_mark = "✅" if inv_ok else "❌"
+    lines = [
+        "Чтобы размещать объявления, нужно:",
+        "",
+        f"{sub_mark} Подписаться на канал {channel}",
+        f"{inv_mark} Пригласить минимум {need} человек в канал",
+        f"Сейчас у вас приглашено: {invites} из {need}",
+    ]
+    if invite_link:
+        lines.extend(
+            [
+                "",
+                "Ваша персональная ссылка-приглашение:",
+                invite_link,
+                "",
+                "Отправьте её друзьям. Когда они вступят в канал по этой "
+                "ссылке — счётчик увеличится.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Нажмите «Моя ссылка», чтобы получить ссылку для приглашений.",
+                "(Бот должен быть админом канала с правом приглашать.)",
+            ]
+        )
+    if subscribed and inv_ok:
+        lines = [
+            "✅ Условия выполнены — можно размещать объявления!",
+            f"Канал: {channel}",
+            f"Приглашено: {invites} из {need}",
+        ]
+    return "\n".join(lines)
+
+
+def post_requirements_keyboard(channel_url: str | None = None) -> InlineKeyboardMarkup:
+    rows = []
+    if channel_url:
+        rows.append(
+            [InlineKeyboardButton(text="📢 Подписаться на канал", url=channel_url)]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="✅ Проверить подписку",
+                callback_data="postreq:check",
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔗 Моя ссылка",
+                callback_data="postreq:link",
+            ),
+            InlineKeyboardButton(
+                text="📊 Мои приглашения",
+                callback_data="postreq:invites",
+            ),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def check_can_post_ads(user_id) -> tuple[bool, dict]:
+    """Return (allowed, info). Admins always allowed. info has subscribed/invites/channel."""
+    channel = await get_channel_label()
+    info = {
+        "subscribed": True,
+        "invites": 0,
+        "channel": channel,
+        "invite_link": None,
+    }
+    if is_admin(user_id):
+        return True, info
+    if not POST_REQUIREMENTS_ENABLED:
+        return True, info
+
+    subscribed = await is_user_subscribed(user_id)
+    invites = get_invite_count(user_id)
+    row = get_user_invite_link_row(user_id)
+    invite_link = row["invite_link"] if row else None
+    info.update(
+        {
+            "subscribed": subscribed,
+            "invites": invites,
+            "invite_link": invite_link,
+        }
+    )
+    allowed = subscribed and invites >= MIN_CHANNEL_INVITES
+    return allowed, info
+
+
+async def deny_posting_if_needed(message: types.Message) -> bool:
+    """If user cannot post, send requirements and return True (caller should stop)."""
+    user_id = message.from_user.id
+    allowed, info = await check_can_post_ads(user_id)
+    if allowed:
+        return False
+    # Ensure invite link is ready when we block
+    if not info.get("invite_link"):
+        link = await get_or_create_invite_link(user_id)
+        info["invite_link"] = link
+    text = format_post_requirements_text(
+        subscribed=info["subscribed"],
+        invites=info["invites"],
+        channel=info["channel"],
+        invite_link=info.get("invite_link"),
+    )
+    url = channel_url_for_button(info["channel"])
+    await message.answer(text, reply_markup=post_requirements_keyboard(url))
+    return True
+
+
+def format_amount_for_ads(ad_count: int) -> str:
+    """Human-readable total: 1× price or N × price = total label."""
+    unit = AD_POST_PRICE
+    if ad_count <= 1:
+        return unit
+    return f"{ad_count} × {unit}"
+
+
+def payment_instructions_text(ad_count: int, amount_label: str, pending_id: int) -> str:
+    # Plain text (no Markdown): amount/details may contain *, _, etc.
+    return (
+        f"💳 Размещение груза — оплата\n\n"
+        f"Объявлений: {ad_count}\n"
+        f"К оплате: {amount_label}\n\n"
+        f"{PAYMENT_DETAILS}\n\n"
+        f"После перевода нажмите «Я оплатил» — администратор проверит "
+        f"и опубликует объявление.\n"
+        f"Заявка №{pending_id}"
+    )
+
+
+def user_payment_keyboard(pending_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Я оплатил",
+                    callback_data=f"pad:paid:{pending_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=f"pad:cancel:{pending_id}",
+                ),
+            ]
+        ]
+    )
+
+
+def admin_payment_keyboard(pending_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Оплата получена — опубликовать",
+                    callback_data=f"pad:ok:{pending_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отклонить",
+                    callback_data=f"pad:no:{pending_id}",
+                ),
+            ],
+        ]
+    )
+
+
+def summarize_pending_items(items) -> str:
+    """Short plain text preview of cargo items for payment/admin messages."""
+    lines = []
+    for i, item in enumerate(items, 1):
+        kind = item.get("kind", "step")
+        if kind == "parsed":
+            origin = item.get("origin", "?")
+            dest = item.get("destination", "?")
+            cargo = item.get("cargo", "Не указано")
+            price = item.get("price", "Не указано")
+            weight = item.get("weight_str", "Не указано")
+        else:
+            origin = item.get("origin", "?")
+            dest = item.get("destination", "?")
+            cargo = item.get("cargo_type", "Не указано")
+            price = item.get("price", "Не указано")
+            weight = item.get("weight", "Не указано")
+            if weight not in (None, "Не указано"):
+                weight = f"{weight} кг"
+        lines.append(
+            f"{i}) {origin} → {dest}\n"
+            f"   Груз: {cargo} | Вес: {weight} | Фрахт: {price}"
+        )
+    return "\n".join(lines) if lines else "(пусто)"
+
+
+async def publish_cargo_item(item: dict, logistician_id: int, author_telegram_id: int):
+    """Write one cargo to DB, channel and subscribers. item has kind step|parsed."""
+    kind = item.get("kind", "step")
+    if kind == "parsed":
+        weight_val = parse_positive_float(item.get("weight_str", "")) or 0
+        user_contact = item.get("contact") or "не указан"
+        loading_date = item.get("loading_date") or "Не указано"
+        add_cargo(
+            logistician_id,
+            item["origin"],
+            item["destination"],
+            item.get("cargo", "Не указано"),
+            weight_val,
+            0,
+            item.get("price", "Не указано"),
+            loading_date,
+            user_contact,
+        )
+        channel_message = format_cargo_message(item) + f"\n🤖 @tranzit_pro_bot"
+        try:
+            await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
+        except Exception as e:
+            logging.error("Failed to publish to channel: %s", e)
+        notice = build_cargo_subscriber_notice(
+            item["origin"],
+            item["destination"],
+            item.get("cargo", "Не указано"),
+            item.get("weight_str", "Не указано"),
+            item.get("price", "Не указано"),
+            user_contact,
+        )
+        await notify_route_subscribers(
+            item["origin"],
+            item["destination"],
+            notice,
+            author_telegram_id=author_telegram_id,
+        )
+        return
+
+    # kind == "step"
+    user_contact = item.get("contact") or "не указан"
+    weight = item.get("weight")
+    volume = item.get("volume")
+    add_cargo(
+        logistician_id,
+        item["origin"],
+        item["destination"],
+        item["cargo_type"],
+        float(weight),
+        float(volume),
+        item["price"],
+        item["date"],
+        user_contact,
+    )
+    origin_f = f"{item.get('origin_flag', '')} {item['origin']}".strip()
+    dest_f = f"{item.get('destination_flag', '')} {item['destination']}".strip()
+    price_display = item["price"]
+    channel_message = (
+        f"📦 *Новый груз*\n\n"
+        f"📍 *Откуда:* {escape_md(origin_f)}\n"
+        f"📍 *Куда:* {escape_md(dest_f)}\n"
+        f"🏷️ *Тип груза:* {escape_md(item['cargo_type'])}\n"
+        f"⚖️ *Вес:* {escape_md(weight)} кг\n"
+        f"📏 *Объем:* {escape_md(volume)} м³\n"
+        f"💰 *Цена:* {escape_md(price_display)}\n"
+        f"📅 *Дата готовности:* {escape_md(item['date'])}\n"
+        f"{format_publish_contact(user_contact)}\n\n"
+        f"🤖 *Хотите быстро найти подходящий груз?*\n"
+        f"Напишите боту: @tranzit_pro_bot"
+    )
+    try:
+        await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
+    except Exception as e:
+        logging.error("Failed to publish to channel: %s", e)
+    notice = build_cargo_subscriber_notice(
+        item["origin"],
+        item["destination"],
+        item["cargo_type"],
+        f"{weight} кг",
+        price_display,
+        user_contact,
+    )
+    await notify_route_subscribers(
+        item["origin"],
+        item["destination"],
+        notice,
+        author_telegram_id=author_telegram_id,
+    )
+
+
+async def publish_cargo_items(items, logistician_id: int, author_telegram_id: int):
+    for item in items:
+        await publish_cargo_item(item, logistician_id, author_telegram_id)
+
+
+async def request_payment_or_publish(
+    *,
+    message: types.Message,
+    logistician_id: int,
+    items: list,
+    free_success_text: str,
+):
+    """Publish immediately for admin/free mode, otherwise start manual payment."""
+    if not items:
+        await message.answer(
+            "Нечего публиковать.",
+            reply_markup=get_logistician_main_keyboard(),
+        )
+        return
+
+    user_id = message.from_user.id
+    if not payment_required_for(user_id):
+        await publish_cargo_items(items, logistician_id, user_id)
+        await message.answer(
+            free_success_text,
+            reply_markup=get_logistician_main_keyboard(),
+        )
+        return
+
+    ad_count = len(items)
+    amount_label = format_amount_for_ads(ad_count)
+    pending_id = create_pending_ad(
+        telegram_id=user_id,
+        logistician_id=logistician_id,
+        cargo_items=items,
+        amount_label=amount_label,
+    )
+    preview = summarize_pending_items(items)
+    text = (
+        payment_instructions_text(ad_count, amount_label, pending_id)
+        + f"\n\n📋 К размещению:\n{preview}"
+    )
+    await message.answer(
+        text,
+        reply_markup=user_payment_keyboard(pending_id),
+    )
+    await message.answer(
+        "Главное меню (объявление появится после подтверждения оплаты).",
+        reply_markup=get_logistician_main_keyboard(),
+    )
+
+
 # Initialize bot and dispatcher
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -361,8 +897,9 @@ def get_driver_main_keyboard():
     builder.add(types.KeyboardButton(text="🔔 Подписка на направления"))
     builder.add(types.KeyboardButton(text="🚚 Разместить свободную машину"))
     builder.add(types.KeyboardButton(text="📋 Мои объявления"))
+    builder.add(types.KeyboardButton(text="📊 Мои приглашения"))
     builder.add(types.KeyboardButton(text="🔄 Сменить роль"))
-    builder.adjust(2, 2, 1)
+    builder.adjust(2, 2, 2)
     return builder.as_markup(resize_keyboard=True)
 
 def get_logistician_main_keyboard():
@@ -371,8 +908,9 @@ def get_logistician_main_keyboard():
     builder.add(types.KeyboardButton(text="🔍 Найти груз"))
     builder.add(types.KeyboardButton(text="🚛 Найти свободные машины"))
     builder.add(types.KeyboardButton(text="📋 Мои объявления"))
+    builder.add(types.KeyboardButton(text="📊 Мои приглашения"))
     builder.add(types.KeyboardButton(text="🔄 Сменить роль"))
-    builder.adjust(2, 2, 1)
+    builder.adjust(2, 2, 2)
     return builder.as_markup(resize_keyboard=True)
 
 def get_country_keyboard():
@@ -486,6 +1024,7 @@ def _cargo_search_menu_labels():
         "🔍 Найти груз",
         "🚛 Найти свободные машины",
         "📋 Мои объявления",
+        "📊 Мои приглашения",
         "🔄 Сменить роль",
         "🟢 Я водитель",
         "🔵 Я логист",
@@ -606,6 +1145,8 @@ async def driver_subscribe_destination(message: types.Message, state: FSMContext
 
 @dp.message(F.text == "🚚 Разместить свободную машину")
 async def driver_add_vehicle_start(message: types.Message, state: FSMContext):
+    if await deny_posting_if_needed(message):
+        return
     await message.answer("Введите город отправления:")
     await state.set_state(DriverStates.adding_vehicle_origin)
 
@@ -741,10 +1282,38 @@ async def view_my_ads_router(message: types.Message, state: FSMContext):
 async def change_role(message: types.Message, state: FSMContext):
     await message.answer("Выберите новую роль:", reply_markup=get_role_keyboard())
     await state.set_state(UserRole.choosing_role)
+
+
+@dp.message(F.text == "📊 Мои приглашения")
+async def my_invites_button(message: types.Message, state: FSMContext):
+    """Show subscription + invite progress and personal invite link."""
+    user_id = message.from_user.id
+    if is_admin(user_id):
+        await message.answer(
+            "Вы администратор бота — можете размещать объявления без "
+            "подписки и приглашений."
+        )
+        return
+    channel = await get_channel_label()
+    subscribed = await is_user_subscribed(user_id)
+    invites = get_invite_count(user_id)
+    link = await get_or_create_invite_link(user_id)
+    text = format_post_requirements_text(
+        subscribed=subscribed,
+        invites=invites,
+        channel=channel,
+        invite_link=link,
+    )
+    url = channel_url_for_button(channel)
+    await message.answer(text, reply_markup=post_requirements_keyboard(url))
+
+
 # --- Logistician Handlers ---
 
 @dp.message(F.text == "📦 Разместить груз")
 async def logistician_add_cargo_start(message: types.Message, state: FSMContext):
+    if await deny_posting_if_needed(message):
+        return
     builder = ReplyKeyboardBuilder()
     builder.add(types.KeyboardButton(text="Пошагово"))
     builder.add(types.KeyboardButton(text="Одним сообщением"))
@@ -849,55 +1418,25 @@ async def logistician_add_cargo_contact(message: types.Message, state: FSMContex
         return
 
     user_contact = resolve_author_contact(message.text, message.from_user)
-    add_cargo(
-        logistician_id,
-        user_data['origin'],
-        user_data['destination'],
-        user_data['cargo_type'],
-        float(weight),
-        float(volume),
-        user_data['price'],
-        user_data['date'],
-        user_contact,
-    )
-    await message.answer("Ваш груз размещен!", reply_markup=get_logistician_main_keyboard())
+    item = {
+        "kind": "step",
+        "origin": user_data["origin"],
+        "destination": user_data["destination"],
+        "origin_flag": user_data.get("origin_flag", ""),
+        "destination_flag": user_data.get("destination_flag", ""),
+        "cargo_type": user_data["cargo_type"],
+        "weight": float(weight),
+        "volume": float(volume),
+        "price": user_data["price"],
+        "date": user_data["date"],
+        "contact": user_contact,
+    }
     await state.set_state(LogisticianStates.main_menu)
-
-    # Auto-publish to channel (same price as in DB — no hidden offset)
-    origin_f = f"{user_data.get('origin_flag', '')} {user_data['origin']}".strip()
-    dest_f = f"{user_data.get('destination_flag', '')} {user_data['destination']}".strip()
-    price_display = user_data['price']
-    channel_message = (
-        f"📦 *Новый груз*\n\n"
-        f"📍 *Откуда:* {escape_md(origin_f)}\n"
-        f"📍 *Куда:* {escape_md(dest_f)}\n"
-        f"🏷️ *Тип груза:* {escape_md(user_data['cargo_type'])}\n"
-        f"⚖️ *Вес:* {escape_md(weight)} кг\n"
-        f"📏 *Объем:* {escape_md(volume)} м³\n"
-        f"💰 *Цена:* {escape_md(price_display)}\n"
-        f"📅 *Дата готовности:* {escape_md(user_data['date'])}\n"
-        f"{format_publish_contact(user_contact)}\n\n"
-        f"🤖 *Хотите быстро найти подходящий груз?*\n"
-        f"Напишите боту: @tranzit_pro_bot"
-    )
-    try:
-        await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
-    except Exception as e:
-        logging.error(f"Failed to publish to channel: {e}")
-
-    notice = build_cargo_subscriber_notice(
-        user_data['origin'],
-        user_data['destination'],
-        user_data['cargo_type'],
-        f"{weight} кг",
-        price_display,
-        user_contact,
-    )
-    await notify_route_subscribers(
-        user_data['origin'],
-        user_data['destination'],
-        notice,
-        author_telegram_id=message.from_user.id,
+    await request_payment_or_publish(
+        message=message,
+        logistician_id=logistician_id,
+        items=[item],
+        free_success_text="Ваш груз размещен!",
     )
 
 @dp.message(LogisticianStates.choosing_placement_mode, F.text == "Одним сообщением")
@@ -1557,7 +2096,15 @@ async def process_single_message_cargo(message: types.Message, state: FSMContext
         response_text += f"--- Объявление #{i} ---\n"
         response_text += format_cargo_message(c) + "\n\n"
 
-    response_text += "Все верно? Каждое объявление будет опубликовано отдельно."
+    n = len(parsed_cargoes)
+    if payment_required_for(message.from_user.id):
+        amount = format_amount_for_ads(n)
+        response_text += (
+            f"Все верно? После подтверждения нужно будет оплатить размещение "
+            f"(*{escape_md(amount)}* за {n} шт.) — публикация после проверки админом."
+        )
+    else:
+        response_text += "Все верно? Каждое объявление будет опубликовано отдельно."
     builder = ReplyKeyboardBuilder()
     builder.add(types.KeyboardButton(text="Да, всё верно"))
     builder.add(types.KeyboardButton(text="Нет, ввести заново"))
@@ -1589,50 +2136,31 @@ async def confirm_single_msg_cargo(message: types.Message, state: FSMContext):
         await state.set_state(UserRole.choosing_role)
         return
 
+    items = []
     for c in parsed_cargoes:
-        weight_val = parse_positive_float(c.get('weight_str', '')) or 0
         # Always store/show the poster contact — never a global hub username
         user_contact = resolve_author_contact(
             c.get('contact'),
             message.from_user,
         )
+        c = dict(c)
         c['contact'] = user_contact
-        loading_date = c.get("loading_date") or "Не указано"
-        add_cargo(
-            logistician_id,
-            c['origin'],
-            c['destination'],
-            c['cargo'],
-            weight_val,
-            0,
-            c.get('price', 'Не указано'),
-            loading_date,
-            user_contact,
-        )
+        c['kind'] = 'parsed'
+        items.append(c)
 
-        channel_message = format_cargo_message(c) + f"\n🤖 @tranzit_pro_bot"
-        try:
-            await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
-        except Exception as e:
-            logging.error(f"Failed to publish to channel: {e}")
-
-        notice = build_cargo_subscriber_notice(
-            c['origin'],
-            c['destination'],
-            c.get('cargo', 'Не указано'),
-            c.get('weight_str', 'Не указано'),
-            c.get('price', 'Не указано'),
-            user_contact,
-        )
-        await notify_route_subscribers(
-            c['origin'],
-            c['destination'],
-            notice,
-            author_telegram_id=message.from_user.id,
-        )
-
-    await message.answer("Все объявления опубликованы!", reply_markup=get_logistician_main_keyboard())
     await state.set_state(LogisticianStates.main_menu)
+    n = len(items)
+    free_text = (
+        "Все объявления опубликованы!"
+        if n > 1
+        else "Ваш груз размещен!"
+    )
+    await request_payment_or_publish(
+        message=message,
+        logistician_id=logistician_id,
+        items=items,
+        free_success_text=free_text,
+    )
 
 @dp.message(LogisticianStates.confirming_cargo, F.text == "Нет, ввести заново")
 async def reject_single_msg_cargo(message: types.Message, state: FSMContext):
@@ -1670,9 +2198,12 @@ async def search_vehicles_origin(message: types.Message, state: FSMContext):
         "🔍 Найти груз",
         "🚛 Найти свободные машины",
         "📋 Мои объявления",
+        "📊 Мои приглашения",
         "🔄 Сменить роль",
         "🟢 Я водитель",
         "🔵 Я логист",
+        "🚚 Разместить свободную машину",
+        "🔔 Подписка на направления",
     }
     if message.text and message.text.strip() in menu_labels:
         await message.answer(
@@ -1729,6 +2260,436 @@ async def search_vehicles_destination(message: types.Message, state: FSMContext)
     await message.answer(response, reply_markup=get_logistician_main_keyboard())
     await state.set_state(LogisticianStates.main_menu)
 
+# --- Manual payment callbacks (cargo ads) ---
+
+def _parse_pending_callback(data: str):
+    """Parse pad:<action>:<id> → (action, pending_id) or (None, None)."""
+    if not data or not data.startswith("pad:"):
+        return None, None
+    parts = data.split(":")
+    if len(parts) != 3:
+        return None, None
+    _, action, raw_id = parts
+    try:
+        return action, int(raw_id)
+    except ValueError:
+        return None, None
+
+
+@dp.callback_query(F.data.startswith("pad:"))
+async def pending_ad_callbacks(callback: CallbackQuery):
+    action, pending_id = _parse_pending_callback(callback.data or "")
+    if action is None or pending_id is None:
+        await callback.answer("Некорректная кнопка", show_alert=True)
+        return
+
+    pending = get_pending_ad(pending_id)
+    if not pending:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    user_id = callback.from_user.id
+
+    # --- User: cancel ---
+    if action == "cancel":
+        if user_id != pending["telegram_id"] and not is_admin(user_id):
+            await callback.answer("Это не ваша заявка", show_alert=True)
+            return
+        if pending["status"] in ("published", "cancelled", "rejected"):
+            await callback.answer("Заявка уже закрыта", show_alert=True)
+            return
+        ok = update_pending_ad_status(
+            pending_id,
+            "cancelled",
+            expected_statuses=("awaiting_payment", "awaiting_admin"),
+        )
+        if not ok:
+            await callback.answer("Не удалось отменить (уже обработана)", show_alert=True)
+            return
+        await callback.answer("Отменено")
+        try:
+            await callback.message.edit_text(
+                f"❌ Заявка №{pending_id} отменена. Объявление не опубликовано."
+            )
+        except Exception:
+            await callback.message.answer(
+                f"❌ Заявка №{pending_id} отменена. Объявление не опубликовано."
+            )
+        return
+
+    # --- User: I paid ---
+    if action == "paid":
+        if user_id != pending["telegram_id"]:
+            await callback.answer("Это не ваша заявка", show_alert=True)
+            return
+        if pending["status"] != "awaiting_payment":
+            status_msg = {
+                "awaiting_admin": "Уже отправлено админу, ждите проверки",
+                "published": "Уже опубликовано",
+                "cancelled": "Заявка отменена",
+                "rejected": "Заявка отклонена",
+            }.get(pending["status"], "Заявка уже обработана")
+            await callback.answer(status_msg, show_alert=True)
+            return
+        ok = update_pending_ad_status(
+            pending_id,
+            "awaiting_admin",
+            expected_statuses=("awaiting_payment",),
+        )
+        if not ok:
+            await callback.answer("Не удалось обновить статус", show_alert=True)
+            return
+
+        await callback.answer("Отправлено администратору")
+        try:
+            await callback.message.edit_text(
+                f"✅ Заявка №{pending_id}: оплата отмечена.\n"
+                f"Ожидайте проверки администратора — после подтверждения "
+                f"объявление появится в канале."
+            )
+        except Exception:
+            await callback.message.answer(
+                f"✅ Заявка №{pending_id}: оплата отмечена. Ожидайте проверки."
+            )
+
+        if ADMIN_ID is None:
+            logging.error("User marked paid but ADMIN_ID is not set")
+            return
+
+        uname = callback.from_user.username
+        user_label = f"@{uname}" if uname else (callback.from_user.full_name or str(user_id))
+        preview = summarize_pending_items(pending["items"])
+        admin_text = (
+            f"💰 Новая оплата за размещение\n\n"
+            f"Заявка: №{pending_id}\n"
+            f"От: {user_label} (id {user_id})\n"
+            f"Объявлений: {pending['ad_count']}\n"
+            f"Сумма: {pending.get('amount_label') or AD_POST_PRICE}\n\n"
+            f"📋 Объявления:\n{preview}\n\n"
+            f"Проверьте перевод и нажмите кнопку."
+        )
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                admin_text,
+                reply_markup=admin_payment_keyboard(pending_id),
+            )
+        except Exception as e:
+            logging.error("Failed to notify admin about payment %s: %s", pending_id, e)
+            await bot.send_message(
+                user_id,
+                "Не удалось уведомить администратора. Напишите ему вручную "
+                f"и укажите заявку №{pending_id}.",
+            )
+        return
+
+    # --- Admin: confirm payment → publish ---
+    if action == "ok":
+        if not is_admin(user_id):
+            await callback.answer("Только для администратора", show_alert=True)
+            return
+        if pending["status"] == "published":
+            await callback.answer("Уже опубликовано", show_alert=True)
+            return
+        if pending["status"] not in ("awaiting_admin", "awaiting_payment"):
+            await callback.answer(
+                f"Нельзя опубликовать (статус: {pending['status']})",
+                show_alert=True,
+            )
+            return
+        ok = update_pending_ad_status(
+            pending_id,
+            "published",
+            expected_statuses=("awaiting_admin", "awaiting_payment"),
+        )
+        if not ok:
+            await callback.answer("Уже обработано", show_alert=True)
+            return
+
+        try:
+            await publish_cargo_items(
+                pending["items"],
+                pending["logistician_id"],
+                pending["telegram_id"],
+            )
+        except Exception as e:
+            logging.exception("Publish failed for pending %s: %s", pending_id, e)
+            # Roll back status so admin can retry
+            update_pending_ad_status(pending_id, "awaiting_admin")
+            await callback.answer("Ошибка публикации, попробуйте ещё раз", show_alert=True)
+            return
+
+        await callback.answer("Опубликовано")
+        try:
+            await callback.message.edit_text(
+                f"✅ Заявка №{pending_id}: оплата подтверждена, "
+                f"объявления опубликованы ({pending['ad_count']} шт)."
+            )
+        except Exception:
+            pass
+        try:
+            await bot.send_message(
+                pending["telegram_id"],
+                f"✅ Оплата по заявке №{pending_id} подтверждена.\n"
+                f"Ваши объявления ({pending['ad_count']}) опубликованы!",
+                reply_markup=get_logistician_main_keyboard(),
+            )
+        except Exception as e:
+            logging.error("Failed to notify user about publish %s: %s", pending_id, e)
+        return
+
+    # --- Admin: reject ---
+    if action == "no":
+        if not is_admin(user_id):
+            await callback.answer("Только для администратора", show_alert=True)
+            return
+        if pending["status"] in ("published", "cancelled", "rejected"):
+            await callback.answer("Заявка уже закрыта", show_alert=True)
+            return
+        ok = update_pending_ad_status(
+            pending_id,
+            "rejected",
+            expected_statuses=("awaiting_admin", "awaiting_payment"),
+        )
+        if not ok:
+            await callback.answer("Уже обработано", show_alert=True)
+            return
+        await callback.answer("Отклонено")
+        try:
+            await callback.message.edit_text(
+                f"❌ Заявка №{pending_id} отклонена. Объявления не опубликованы."
+            )
+        except Exception:
+            pass
+        try:
+            await bot.send_message(
+                pending["telegram_id"],
+                f"❌ Заявка №{pending_id} отклонена администратором.\n"
+                f"Если вы уже перевели оплату — напишите админу с номером заявки.\n"
+                f"Объявления не опубликованы.",
+                reply_markup=get_logistician_main_keyboard(),
+            )
+        except Exception as e:
+            logging.error("Failed to notify user about reject %s: %s", pending_id, e)
+        return
+
+    await callback.answer("Неизвестное действие", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("postreq:"))
+async def post_requirements_callbacks(callback: CallbackQuery):
+    """Inline buttons: check subscription, show link, show invite count."""
+    user_id = callback.from_user.id
+    action = (callback.data or "").split(":", 1)[-1]
+
+    if is_admin(user_id):
+        await callback.answer("Вы админ — ограничения не применяются", show_alert=True)
+        return
+
+    channel = await get_channel_label()
+    url = channel_url_for_button(channel)
+
+    if action == "check":
+        subscribed = await is_user_subscribed(user_id)
+        invites = get_invite_count(user_id)
+        link = await get_or_create_invite_link(user_id)
+        text = format_post_requirements_text(
+            subscribed=subscribed,
+            invites=invites,
+            channel=channel,
+            invite_link=link,
+        )
+        try:
+            await callback.message.edit_text(
+                text, reply_markup=post_requirements_keyboard(url)
+            )
+        except Exception:
+            await callback.message.answer(
+                text, reply_markup=post_requirements_keyboard(url)
+            )
+        if subscribed and invites >= MIN_CHANNEL_INVITES:
+            await callback.answer("Готово! Можно размещать объявления ✅")
+        elif not subscribed:
+            await callback.answer("Сначала подпишитесь на канал", show_alert=True)
+        else:
+            await callback.answer(
+                f"Приглашено {invites} из {MIN_CHANNEL_INVITES}",
+                show_alert=True,
+            )
+        return
+
+    if action == "link":
+        link = await get_or_create_invite_link(user_id)
+        if not link:
+            await callback.answer(
+                "Не удалось создать ссылку. Бот должен быть админом канала.",
+                show_alert=True,
+            )
+            return
+        invites = get_invite_count(user_id)
+        await callback.message.answer(
+            f"🔗 Ваша персональная ссылка для приглашения в {channel}:\n\n"
+            f"{link}\n\n"
+            f"Отправьте её друзьям. Когда они вступят в канал — "
+            f"счётчик вырастет.\n"
+            f"Сейчас приглашено: {invites} из {MIN_CHANNEL_INVITES}",
+            reply_markup=post_requirements_keyboard(url),
+        )
+        await callback.answer("Ссылка отправлена")
+        return
+
+    if action == "invites":
+        subscribed = await is_user_subscribed(user_id)
+        invites = get_invite_count(user_id)
+        link = await get_or_create_invite_link(user_id)
+        text = format_post_requirements_text(
+            subscribed=subscribed,
+            invites=invites,
+            channel=channel,
+            invite_link=link,
+        )
+        await callback.message.answer(
+            text, reply_markup=post_requirements_keyboard(url)
+        )
+        await callback.answer()
+        return
+
+    await callback.answer("Неизвестное действие")
+
+
+@dp.chat_member()
+async def on_channel_chat_member(event: types.ChatMemberUpdated):
+    """Count channel joins via personal invite links created by the bot."""
+    try:
+        chat_id = event.chat.id
+        # Match numeric id or @username channel
+        channel_ref = str(CHANNEL_ID).strip()
+        matched = False
+        if channel_ref.startswith("@"):
+            uname = (event.chat.username or "").lower()
+            if uname and uname == channel_ref.lstrip("@").lower():
+                matched = True
+        else:
+            try:
+                matched = int(channel_ref) == chat_id
+            except ValueError:
+                matched = channel_ref == str(chat_id)
+        if not matched:
+            return
+
+        old_status = _member_status_value(event.old_chat_member)
+        new_status = _member_status_value(event.new_chat_member)
+        # Only count real joins: was not a member → became a member
+        was_member = old_status in _MEMBER_STATUSES
+        is_member = new_status in _MEMBER_STATUSES
+        if was_member or not is_member:
+            return
+
+        invited_user = event.new_chat_member.user
+        if not invited_user or getattr(invited_user, "is_bot", False):
+            return
+        invited_id = invited_user.id
+
+        invite_link = event.invite_link
+        if not invite_link:
+            return
+
+        inviter_id = None
+        link_name = getattr(invite_link, "name", None) or ""
+        if link_name:
+            inviter_id = get_inviter_by_link_name(link_name)
+            if inviter_id is None and link_name.startswith("ref"):
+                # Fallback: parse ref{user_id} even if DB row missing
+                raw = link_name[3:]
+                if raw.isdigit():
+                    inviter_id = int(raw)
+
+        if inviter_id is None:
+            return
+
+        if record_channel_invite(inviter_id, invited_id):
+            count = get_invite_count(inviter_id)
+            logging.info(
+                "Invite credited: inviter=%s invited=%s total=%s",
+                inviter_id,
+                invited_id,
+                count,
+            )
+            try:
+                need = MIN_CHANNEL_INVITES
+                if count >= need:
+                    msg = (
+                        f"🎉 Новый участник по вашей ссылке!\n"
+                        f"Приглашено: {count} из {need} — "
+                        f"можно размещать объявления "
+                        f"(не забудьте сами быть подписаны на канал)."
+                    )
+                else:
+                    msg = (
+                        f"👋 Новый участник по вашей ссылке!\n"
+                        f"Приглашено: {count} из {need}."
+                    )
+                await bot.send_message(inviter_id, msg)
+            except Exception as e:
+                logging.warning("Could not notify inviter %s: %s", inviter_id, e)
+    except Exception as e:
+        logging.error("chat_member handler error: %s", e)
+
+
+@dp.message(Command("pending"))
+async def admin_list_pending(message: types.Message):
+    """Admin: list cargo ads waiting for payment confirmation."""
+    if not is_admin(message.from_user.id):
+        await message.answer("Команда только для администратора.")
+        return
+    rows = list_pending_ads_for_admin(limit=15)
+    if not rows:
+        await message.answer("Нет заявок, ожидающих подтверждения оплаты.")
+        return
+    await message.answer(f"Заявок на проверке: {len(rows)}")
+    for row in rows:
+        preview = summarize_pending_items(row["items"])
+        text = (
+            f"Заявка №{row['id']}\n"
+            f"От id {row['telegram_id']}\n"
+            f"Сумма: {row.get('amount_label') or AD_POST_PRICE}\n"
+            f"Объявлений: {row['ad_count']}\n\n"
+            f"{preview}"
+        )
+        await message.answer(
+            text,
+            reply_markup=admin_payment_keyboard(row["id"]),
+        )
+
+
+@dp.message(Command("payinfo"))
+async def payinfo_command(message: types.Message):
+    """Show current cargo posting price and payment details."""
+    if not PAYMENT_ENABLED or ADMIN_ID is None:
+        await message.answer(
+            "Сейчас размещение грузов без оплаты "
+            "(оплата выключена или не задан ADMIN_ID)."
+        )
+        return
+    if is_admin(message.from_user.id):
+        extra = (
+            f"\n\n(Вы админ — размещаете бесплатно.)\n"
+            f"Список заявок: /pending"
+        )
+    else:
+        extra = ""
+    await message.answer(
+        f"💳 Размещение груза: {AD_POST_PRICE} за одно объявление.\n\n"
+        f"{PAYMENT_DETAILS}\n\n"
+        f"Машины (водители) — бесплатно."
+        f"{extra}",
+    )
+
+
 # --- Fallback ---
 @dp.message()
 async def echo_handler(message: types.Message):
@@ -1740,8 +2701,16 @@ async def main():
     # Ensure polling mode: drop any leftover webhook and stale updates
     # (does not fix two simultaneous polling instances with the same token)
     await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("Webhook cleared, starting polling")
-    await dp.start_polling(bot)
+    # chat_member is required to count channel invites via personal links;
+    # resolve_used_update_types() includes it because of @dp.chat_member.
+    allowed = dp.resolve_used_update_types()
+    logging.info(
+        "Webhook cleared, starting polling (updates=%s, post_gate=%s, min_invites=%s)",
+        allowed,
+        POST_REQUIREMENTS_ENABLED,
+        MIN_CHANNEL_INVITES,
+    )
+    await dp.start_polling(bot, allowed_updates=allowed)
 
 if __name__ == "__main__":
     asyncio.run(main())

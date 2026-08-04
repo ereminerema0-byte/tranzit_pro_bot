@@ -1,5 +1,7 @@
+import json
 import sqlite3
 import re
+from datetime import datetime, timezone
 
 
 def _norm_city(value) -> str:
@@ -80,8 +82,290 @@ def init_db():
         )
     ''')
 
+    # Pending cargo ads awaiting manual payment confirmation by admin
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pending_ads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER NOT NULL,
+            logistician_id INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            ad_count INTEGER NOT NULL DEFAULT 1,
+            amount_label TEXT,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            FOREIGN KEY (logistician_id) REFERENCES logisticians(id)
+        )
+    ''')
+
+    # Personal channel invite links (one per user) for tracking referrals
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_invite_links (
+            telegram_id INTEGER PRIMARY KEY,
+            invite_link TEXT NOT NULL,
+            link_name TEXT,
+            created_at TEXT NOT NULL
+        )
+    ''')
+
+    # Channel joins credited to an inviter (each joiner counted once)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS channel_invites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            inviter_telegram_id INTEGER NOT NULL,
+            invited_telegram_id INTEGER NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+        )
+    ''')
+    cursor.execute(
+        'CREATE INDEX IF NOT EXISTS idx_channel_invites_inviter '
+        'ON channel_invites(inviter_telegram_id)'
+    )
+
     conn.commit()
     conn.close()
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def create_pending_ad(telegram_id, logistician_id, cargo_items, amount_label):
+    """Store cargo payload until user pays and admin confirms.
+
+    cargo_items: list of dicts (JSON-serializable). status starts as awaiting_payment.
+    """
+    if not cargo_items:
+        raise ValueError("cargo_items must not be empty")
+    now = _utcnow_iso()
+    payload = json.dumps(cargo_items, ensure_ascii=False)
+    conn = sqlite3.connect('cargo_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        '''
+        INSERT INTO pending_ads
+            (telegram_id, logistician_id, payload, ad_count, amount_label, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''',
+        (
+            telegram_id,
+            logistician_id,
+            payload,
+            len(cargo_items),
+            amount_label,
+            'awaiting_payment',
+            now,
+            now,
+        ),
+    )
+    pending_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return pending_id
+
+
+def get_pending_ad(pending_id):
+    """Return dict or None. payload is already parsed to list of dicts."""
+    conn = sqlite3.connect('cargo_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        '''
+        SELECT id, telegram_id, logistician_id, payload, ad_count, amount_label, status, created_at, updated_at
+        FROM pending_ads WHERE id = ?
+        ''',
+        (pending_id,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        items = json.loads(row[3])
+    except (TypeError, json.JSONDecodeError):
+        items = []
+    return {
+        'id': row[0],
+        'telegram_id': row[1],
+        'logistician_id': row[2],
+        'items': items,
+        'ad_count': row[4],
+        'amount_label': row[5],
+        'status': row[6],
+        'created_at': row[7],
+        'updated_at': row[8],
+    }
+
+
+def update_pending_ad_status(pending_id, new_status, expected_statuses=None):
+    """Update status if current status is in expected_statuses (or any if None).
+
+    Returns True if a row was updated.
+    """
+    conn = sqlite3.connect('cargo_bot.db')
+    cursor = conn.cursor()
+    now = _utcnow_iso()
+    if expected_statuses:
+        placeholders = ','.join('?' for _ in expected_statuses)
+        cursor.execute(
+            f'''
+            UPDATE pending_ads
+            SET status = ?, updated_at = ?
+            WHERE id = ? AND status IN ({placeholders})
+            ''',
+            (new_status, now, pending_id, *expected_statuses),
+        )
+    else:
+        cursor.execute(
+            '''
+            UPDATE pending_ads
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+            ''',
+            (new_status, now, pending_id),
+        )
+    changed = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return changed
+
+
+def list_pending_ads_for_admin(limit=20):
+    """Recent pending ads waiting for admin (awaiting_admin)."""
+    conn = sqlite3.connect('cargo_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        '''
+        SELECT id, telegram_id, logistician_id, payload, ad_count, amount_label, status, created_at
+        FROM pending_ads
+        WHERE status = 'awaiting_admin'
+        ORDER BY id DESC
+        LIMIT ?
+        ''',
+        (limit,),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        try:
+            items = json.loads(row[3])
+        except (TypeError, json.JSONDecodeError):
+            items = []
+        result.append({
+            'id': row[0],
+            'telegram_id': row[1],
+            'logistician_id': row[2],
+            'items': items,
+            'ad_count': row[4],
+            'amount_label': row[5],
+            'status': row[6],
+            'created_at': row[7],
+        })
+    return result
+
+
+# --- Channel invite tracking (for post-ad requirements) ---
+
+def get_user_invite_link_row(telegram_id):
+    """Return {invite_link, link_name, created_at} or None."""
+    conn = sqlite3.connect('cargo_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        '''
+        SELECT invite_link, link_name, created_at
+        FROM user_invite_links WHERE telegram_id = ?
+        ''',
+        (telegram_id,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        'invite_link': row[0],
+        'link_name': row[1],
+        'created_at': row[2],
+    }
+
+
+def save_user_invite_link(telegram_id, invite_link, link_name=None):
+    """Upsert personal invite link for a user."""
+    now = _utcnow_iso()
+    conn = sqlite3.connect('cargo_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        '''
+        INSERT INTO user_invite_links (telegram_id, invite_link, link_name, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(telegram_id) DO UPDATE SET
+            invite_link = excluded.invite_link,
+            link_name = excluded.link_name,
+            created_at = excluded.created_at
+        ''',
+        (telegram_id, invite_link, link_name, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_inviter_by_link_name(link_name):
+    """Resolve inviter telegram_id by invite link name, or None."""
+    if not link_name:
+        return None
+    conn = sqlite3.connect('cargo_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT telegram_id FROM user_invite_links WHERE link_name = ?',
+        (link_name,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def get_invite_count(telegram_id) -> int:
+    """How many unique people this user invited to the channel."""
+    conn = sqlite3.connect('cargo_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT COUNT(*) FROM channel_invites WHERE inviter_telegram_id = ?',
+        (telegram_id,),
+    )
+    n = cursor.fetchone()[0]
+    conn.close()
+    return int(n or 0)
+
+
+def record_channel_invite(inviter_telegram_id, invited_telegram_id) -> bool:
+    """Credit a channel join to inviter. Each invited user counts once globally.
+
+    Returns True if a new invite was recorded, False if duplicate/self/invalid.
+    """
+    if not inviter_telegram_id or not invited_telegram_id:
+        return False
+    if inviter_telegram_id == invited_telegram_id:
+        return False
+    now = _utcnow_iso()
+    conn = sqlite3.connect('cargo_bot.db')
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            '''
+            INSERT INTO channel_invites
+                (inviter_telegram_id, invited_telegram_id, created_at)
+            VALUES (?, ?, ?)
+            ''',
+            (inviter_telegram_id, invited_telegram_id, now),
+        )
+        conn.commit()
+        changed = cursor.rowcount > 0
+    except sqlite3.IntegrityError:
+        # invited_telegram_id already credited to someone
+        changed = False
+    finally:
+        conn.close()
+    return changed
+
 
 def add_user(telegram_id, role, contact_info=None):
     conn = sqlite3.connect('cargo_bot.db')
