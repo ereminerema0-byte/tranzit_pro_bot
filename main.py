@@ -44,6 +44,48 @@ def _parse_admin_id(raw):
 
 
 ADMIN_ID = _parse_admin_id(os.getenv("ADMIN_ID"))
+
+
+def _parse_free_post_usernames(raw) -> frozenset:
+    """Comma/space-separated Telegram @usernames (case-insensitive)."""
+    names = set()
+    for part in re.split(r"[,;\s]+", (raw or "").strip()):
+        name = part.strip().lstrip("@").lower()
+        if name:
+            names.add(name)
+    return frozenset(names)
+
+
+def _parse_free_post_ids(raw) -> frozenset:
+    """Comma/space-separated Telegram numeric user ids."""
+    ids = set()
+    for part in re.split(r"[,;\s]+", (raw or "").strip()):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.add(int(part))
+        except ValueError:
+            logging.error(
+                "FREE_POST_USER_IDS: ожидался числовой Telegram id, получено: %r",
+                part,
+            )
+    return frozenset(ids)
+
+
+# Users who may post cargo/vehicles freely (no channel invites, no cargo payment).
+# Default includes @Oleg34381. Override via FREE_POST_USERNAMES / FREE_POST_USER_IDS.
+# If FREE_POST_USERNAMES is set in env (even empty), that value replaces the default.
+_free_usernames_env = os.getenv("FREE_POST_USERNAMES")
+FREE_POST_USERNAMES = (
+    _parse_free_post_usernames(_free_usernames_env)
+    if _free_usernames_env is not None
+    else frozenset({"oleg34381"})
+)
+FREE_POST_USER_IDS = _parse_free_post_ids(os.getenv("FREE_POST_USER_IDS") or "")
+# telegram_id -> last seen @username (lowercased) for free-poster checks by id-only paths
+_username_by_id: dict[int, str] = {}
+
 # Price for ONE cargo ad. Multi-ad batch = count × this label (same unit text).
 AD_POST_PRICE = (os.getenv("AD_POST_PRICE") or "50 000 сум").strip()
 # Bank/card/phone details shown to the logistician before publish.
@@ -366,11 +408,38 @@ def is_admin(user_id) -> bool:
     return ADMIN_ID is not None and user_id == ADMIN_ID
 
 
-def payment_required_for(user_id) -> bool:
-    """Cargo ads are paid unless payment is off or the poster is admin."""
+def remember_telegram_user(user) -> None:
+    """Cache @username for free-poster checks that only receive user_id."""
+    if user is None:
+        return
+    uid = getattr(user, "id", None)
+    uname = getattr(user, "username", None)
+    if uid is None or not uname:
+        return
+    _username_by_id[int(uid)] = str(uname).lstrip("@").lower()
+
+
+def is_free_poster(user_id, username=None) -> bool:
+    """True for admin or whitelisted free posters (by id or @username)."""
+    if is_admin(user_id):
+        return True
+    try:
+        uid = int(user_id) if user_id is not None else None
+    except (TypeError, ValueError):
+        uid = None
+    if uid is not None and uid in FREE_POST_USER_IDS:
+        return True
+    uname = (username or "").strip().lstrip("@").lower()
+    if not uname and uid is not None:
+        uname = _username_by_id.get(uid, "")
+    return bool(uname) and uname in FREE_POST_USERNAMES
+
+
+def payment_required_for(user_id, username=None) -> bool:
+    """Cargo ads are paid unless payment is off or the poster is free/admin."""
     if not PAYMENT_ENABLED:
         return False
-    if is_admin(user_id):
+    if is_free_poster(user_id, username=username):
         return False
     if ADMIN_ID is None:
         # Nobody can confirm payments — do not block users.
@@ -564,8 +633,8 @@ def post_requirements_keyboard(channel_url: str | None = None) -> InlineKeyboard
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def check_can_post_ads(user_id) -> tuple[bool, dict]:
-    """Return (allowed, info). Admins always allowed. info has subscribed/invites/channel."""
+async def check_can_post_ads(user_id, username=None) -> tuple[bool, dict]:
+    """Return (allowed, info). Free posters/admins always allowed."""
     channel = await get_channel_label()
     info = {
         "subscribed": True,
@@ -573,7 +642,7 @@ async def check_can_post_ads(user_id) -> tuple[bool, dict]:
         "channel": channel,
         "invite_link": None,
     }
-    if is_admin(user_id):
+    if is_free_poster(user_id, username=username):
         return True, info
     if not POST_REQUIREMENTS_ENABLED:
         return True, info
@@ -595,8 +664,12 @@ async def check_can_post_ads(user_id) -> tuple[bool, dict]:
 
 async def deny_posting_if_needed(message: types.Message) -> bool:
     """If user cannot post, send requirements and return True (caller should stop)."""
-    user_id = message.from_user.id
-    allowed, info = await check_can_post_ads(user_id)
+    user = message.from_user
+    remember_telegram_user(user)
+    user_id = user.id
+    allowed, info = await check_can_post_ads(
+        user_id, username=getattr(user, "username", None)
+    )
     if allowed:
         return False
     # Ensure invite link is ready when we block
@@ -807,8 +880,10 @@ async def request_payment_or_publish(
         )
         return
 
-    user_id = message.from_user.id
-    if not payment_required_for(user_id):
+    user = message.from_user
+    remember_telegram_user(user)
+    user_id = user.id
+    if not payment_required_for(user_id, username=getattr(user, "username", None)):
         await publish_cargo_items(items, logistician_id, user_id)
         await message.answer(
             free_success_text,
@@ -1287,11 +1362,13 @@ async def change_role(message: types.Message, state: FSMContext):
 @dp.message(F.text == "📊 Мои приглашения")
 async def my_invites_button(message: types.Message, state: FSMContext):
     """Show subscription + invite progress and personal invite link."""
-    user_id = message.from_user.id
-    if is_admin(user_id):
+    user = message.from_user
+    remember_telegram_user(user)
+    user_id = user.id
+    if is_free_poster(user_id, username=getattr(user, "username", None)):
         await message.answer(
-            "Вы администратор бота — можете размещать объявления без "
-            "подписки и приглашений."
+            "Вы можете размещать объявления без "
+            "подписки, приглашений и оплаты."
         )
         return
     channel = await get_channel_label()
@@ -2097,7 +2174,11 @@ async def process_single_message_cargo(message: types.Message, state: FSMContext
         response_text += format_cargo_message(c) + "\n\n"
 
     n = len(parsed_cargoes)
-    if payment_required_for(message.from_user.id):
+    remember_telegram_user(message.from_user)
+    if payment_required_for(
+        message.from_user.id,
+        username=getattr(message.from_user, "username", None),
+    ):
         amount = format_amount_for_ads(n)
         response_text += (
             f"Все верно? После подтверждения нужно будет оплатить размещение "
@@ -2483,11 +2564,16 @@ async def pending_ad_callbacks(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("postreq:"))
 async def post_requirements_callbacks(callback: CallbackQuery):
     """Inline buttons: check subscription, show link, show invite count."""
-    user_id = callback.from_user.id
+    user = callback.from_user
+    remember_telegram_user(user)
+    user_id = user.id
     action = (callback.data or "").split(":", 1)[-1]
 
-    if is_admin(user_id):
-        await callback.answer("Вы админ — ограничения не применяются", show_alert=True)
+    if is_free_poster(user_id, username=getattr(user, "username", None)):
+        await callback.answer(
+            "Ограничения не применяются — можно размещать свободно",
+            show_alert=True,
+        )
         return
 
     channel = await get_channel_label()
@@ -2669,17 +2755,24 @@ async def admin_list_pending(message: types.Message):
 @dp.message(Command("payinfo"))
 async def payinfo_command(message: types.Message):
     """Show current cargo posting price and payment details."""
+    remember_telegram_user(message.from_user)
     if not PAYMENT_ENABLED or ADMIN_ID is None:
         await message.answer(
             "Сейчас размещение грузов без оплаты "
             "(оплата выключена или не задан ADMIN_ID)."
         )
         return
-    if is_admin(message.from_user.id):
-        extra = (
-            f"\n\n(Вы админ — размещаете бесплатно.)\n"
-            f"Список заявок: /pending"
-        )
+    if is_free_poster(
+        message.from_user.id,
+        username=getattr(message.from_user, "username", None),
+    ):
+        if is_admin(message.from_user.id):
+            extra = (
+                f"\n\n(Вы админ — размещаете бесплатно.)\n"
+                f"Список заявок: /pending"
+            )
+        else:
+            extra = "\n\n(Вам доступно бесплатное размещение.)"
     else:
         extra = ""
     await message.answer(
@@ -2705,10 +2798,13 @@ async def main():
     # resolve_used_update_types() includes it because of @dp.chat_member.
     allowed = dp.resolve_used_update_types()
     logging.info(
-        "Webhook cleared, starting polling (updates=%s, post_gate=%s, min_invites=%s)",
+        "Webhook cleared, starting polling "
+        "(updates=%s, post_gate=%s, min_invites=%s, free_usernames=%s, free_ids=%s)",
         allowed,
         POST_REQUIREMENTS_ENABLED,
         MIN_CHANNEL_INVITES,
+        sorted(FREE_POST_USERNAMES) if FREE_POST_USERNAMES else [],
+        sorted(FREE_POST_USER_IDS) if FREE_POST_USER_IDS else [],
     )
     await dp.start_polling(bot, allowed_updates=allowed)
 
