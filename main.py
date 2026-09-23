@@ -10,21 +10,6 @@ logging.basicConfig(level=logging.INFO)
 # Bot configuration
 TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@tranzitpro1")
-# Public @username of the channel for user-facing messages (optional).
-# If empty, bot tries CHANNEL_ID when it looks like @name, else getChat.
-CHANNEL_USERNAME = (os.getenv("CHANNEL_USERNAME") or "").strip()
-# Min unique channel invites required before a non-admin can post ads.
-try:
-    MIN_CHANNEL_INVITES = max(0, int((os.getenv("MIN_CHANNEL_INVITES") or "5").strip()))
-except ValueError:
-    MIN_CHANNEL_INVITES = 5
-# Set POST_REQUIREMENTS_ENABLED=0 to temporarily disable the gate.
-POST_REQUIREMENTS_ENABLED = (os.getenv("POST_REQUIREMENTS_ENABLED") or "1").strip().lower() not in (
-    "0",
-    "false",
-    "no",
-    "off",
-)
 # Ads always show the contact of the person who posted.
 # CONTACT_USERNAME is intentionally NOT used in announcements (was wrongly
 # substituting one fixed hub username for every cargo). Kept only so old
@@ -73,7 +58,7 @@ def _parse_free_post_ids(raw) -> frozenset:
     return frozenset(ids)
 
 
-# Users who may post cargo/vehicles freely (no channel invites, no cargo payment).
+# Users who may post cargo without payment.
 # Default includes @Oleg34381. Override via FREE_POST_USERNAMES / FREE_POST_USER_IDS.
 # If FREE_POST_USERNAMES is set in env (even empty), that value replaces the default.
 _free_usernames_env = os.getenv("FREE_POST_USERNAMES")
@@ -146,11 +131,6 @@ from db import (
     get_pending_ad,
     update_pending_ad_status,
     list_pending_ads_for_admin,
-    get_user_invite_link_row,
-    save_user_invite_link,
-    get_inviter_by_link_name,
-    get_invite_count,
-    record_channel_invite,
 )
 
 CITY_FLAGS = {
@@ -447,246 +427,6 @@ def payment_required_for(user_id, username=None) -> bool:
     return True
 
 
-# --- Post-ad requirements: channel subscription + N invites ---
-
-_MEMBER_STATUSES = frozenset({"member", "administrator", "creator", "restricted"})
-_LEFT_STATUSES = frozenset({"left", "kicked"})
-_channel_label_cache = None
-
-
-def _normalize_channel_username(raw: str) -> str:
-    s = (raw or "").strip()
-    if not s:
-        return ""
-    if s.startswith("https://t.me/"):
-        s = s[len("https://t.me/") :]
-    elif s.startswith("t.me/"):
-        s = s[len("t.me/") :]
-    s = s.strip().lstrip("@").split("/")[0].split("?")[0]
-    return f"@{s}" if s else ""
-
-
-def channel_label_sync() -> str:
-    """Best-effort channel name without API (for early messages)."""
-    if CHANNEL_USERNAME:
-        return _normalize_channel_username(CHANNEL_USERNAME) or CHANNEL_USERNAME
-    ch = str(CHANNEL_ID or "").strip()
-    if ch.startswith("@"):
-        return ch
-    return "канал"
-
-
-async def get_channel_label() -> str:
-    """Human-facing channel name: @username or title."""
-    global _channel_label_cache
-    if _channel_label_cache:
-        return _channel_label_cache
-    label = channel_label_sync()
-    if label.startswith("@"):
-        _channel_label_cache = label
-        return label
-    try:
-        chat = await bot.get_chat(CHANNEL_ID)
-        if getattr(chat, "username", None):
-            label = f"@{chat.username}"
-        elif getattr(chat, "title", None):
-            label = chat.title
-    except Exception as e:
-        logging.warning("Could not resolve channel label: %s", e)
-    _channel_label_cache = label
-    return label
-
-
-def channel_url_for_button(label: str) -> str | None:
-    """Public t.me URL if we know @username."""
-    if label and label.startswith("@") and len(label) > 1:
-        return f"https://t.me/{label[1:]}"
-    uname = _normalize_channel_username(CHANNEL_USERNAME)
-    if uname:
-        return f"https://t.me/{uname[1:]}"
-    ch = str(CHANNEL_ID or "").strip()
-    if ch.startswith("@"):
-        return f"https://t.me/{ch[1:]}"
-    return None
-
-
-def _member_status_value(member) -> str:
-    status = getattr(member, "status", None)
-    if status is None:
-        return ""
-    return status.value if hasattr(status, "value") else str(status)
-
-
-async def is_user_subscribed(user_id) -> bool:
-    """True if user is a member of CHANNEL_ID (or admin/creator)."""
-    try:
-        member = await bot.get_chat_member(CHANNEL_ID, user_id)
-        return _member_status_value(member) in _MEMBER_STATUSES
-    except Exception as e:
-        logging.warning("get_chat_member failed for %s: %s", user_id, e)
-        return False
-
-
-def invite_link_name_for(user_id: int) -> str:
-    # Telegram invite link name max length is 32
-    return f"ref{user_id}"[:32]
-
-
-async def get_or_create_invite_link(user_id: int) -> str | None:
-    """Personal channel invite link for tracking who invited whom."""
-    row = get_user_invite_link_row(user_id)
-    if row and row.get("invite_link"):
-        return row["invite_link"]
-    name = invite_link_name_for(user_id)
-    try:
-        link = await bot.create_chat_invite_link(
-            chat_id=CHANNEL_ID,
-            name=name,
-            creates_join_request=False,
-        )
-        url = link.invite_link
-        save_user_invite_link(user_id, url, name)
-        return url
-    except Exception as e:
-        logging.error(
-            "Failed to create invite link for %s (bot must be channel admin "
-            "with invite permission): %s",
-            user_id,
-            e,
-        )
-        return None
-
-
-def format_post_requirements_text(
-    *,
-    subscribed: bool,
-    invites: int,
-    channel: str,
-    invite_link: str | None = None,
-) -> str:
-    """Clear Russian message when post requirements are not met."""
-    need = MIN_CHANNEL_INVITES
-    sub_mark = "✅" if subscribed else "❌"
-    inv_ok = invites >= need
-    inv_mark = "✅" if inv_ok else "❌"
-    lines = [
-        "Чтобы размещать объявления, нужно:",
-        "",
-        f"{sub_mark} Подписаться на канал {channel}",
-        f"{inv_mark} Пригласить минимум {need} человек в канал",
-        f"Сейчас у вас приглашено: {invites} из {need}",
-    ]
-    if invite_link:
-        lines.extend(
-            [
-                "",
-                "Ваша персональная ссылка-приглашение:",
-                invite_link,
-                "",
-                "Отправьте её друзьям. Когда они вступят в канал по этой "
-                "ссылке — счётчик увеличится.",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "",
-                "Нажмите «Моя ссылка», чтобы получить ссылку для приглашений.",
-                "(Бот должен быть админом канала с правом приглашать.)",
-            ]
-        )
-    if subscribed and inv_ok:
-        lines = [
-            "✅ Условия выполнены — можно размещать объявления!",
-            f"Канал: {channel}",
-            f"Приглашено: {invites} из {need}",
-        ]
-    return "\n".join(lines)
-
-
-def post_requirements_keyboard(channel_url: str | None = None) -> InlineKeyboardMarkup:
-    rows = []
-    if channel_url:
-        rows.append(
-            [InlineKeyboardButton(text="📢 Подписаться на канал", url=channel_url)]
-        )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="✅ Проверить подписку",
-                callback_data="postreq:check",
-            )
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="🔗 Моя ссылка",
-                callback_data="postreq:link",
-            ),
-            InlineKeyboardButton(
-                text="📊 Мои приглашения",
-                callback_data="postreq:invites",
-            ),
-        ]
-    )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-async def check_can_post_ads(user_id, username=None) -> tuple[bool, dict]:
-    """Return (allowed, info). Free posters/admins always allowed."""
-    channel = await get_channel_label()
-    info = {
-        "subscribed": True,
-        "invites": 0,
-        "channel": channel,
-        "invite_link": None,
-    }
-    if is_free_poster(user_id, username=username):
-        return True, info
-    if not POST_REQUIREMENTS_ENABLED:
-        return True, info
-
-    subscribed = await is_user_subscribed(user_id)
-    invites = get_invite_count(user_id)
-    row = get_user_invite_link_row(user_id)
-    invite_link = row["invite_link"] if row else None
-    info.update(
-        {
-            "subscribed": subscribed,
-            "invites": invites,
-            "invite_link": invite_link,
-        }
-    )
-    allowed = subscribed and invites >= MIN_CHANNEL_INVITES
-    return allowed, info
-
-
-async def deny_posting_if_needed(message: types.Message) -> bool:
-    """If user cannot post, send requirements and return True (caller should stop)."""
-    user = message.from_user
-    remember_telegram_user(user)
-    user_id = user.id
-    allowed, info = await check_can_post_ads(
-        user_id, username=getattr(user, "username", None)
-    )
-    if allowed:
-        return False
-    # Ensure invite link is ready when we block
-    if not info.get("invite_link"):
-        link = await get_or_create_invite_link(user_id)
-        info["invite_link"] = link
-    text = format_post_requirements_text(
-        subscribed=info["subscribed"],
-        invites=info["invites"],
-        channel=info["channel"],
-        invite_link=info.get("invite_link"),
-    )
-    url = channel_url_for_button(info["channel"])
-    await message.answer(text, reply_markup=post_requirements_keyboard(url))
-    return True
-
-
 def format_amount_for_ads(ad_count: int) -> str:
     """Human-readable total: 1× price or N × price = total label."""
     unit = AD_POST_PRICE
@@ -972,9 +712,8 @@ def get_driver_main_keyboard():
     builder.add(types.KeyboardButton(text="🔔 Подписка на направления"))
     builder.add(types.KeyboardButton(text="🚚 Разместить свободную машину"))
     builder.add(types.KeyboardButton(text="📋 Мои объявления"))
-    builder.add(types.KeyboardButton(text="📊 Мои приглашения"))
     builder.add(types.KeyboardButton(text="🔄 Сменить роль"))
-    builder.adjust(2, 2, 2)
+    builder.adjust(2, 2, 1)
     return builder.as_markup(resize_keyboard=True)
 
 def get_logistician_main_keyboard():
@@ -983,9 +722,8 @@ def get_logistician_main_keyboard():
     builder.add(types.KeyboardButton(text="🔍 Найти груз"))
     builder.add(types.KeyboardButton(text="🚛 Найти свободные машины"))
     builder.add(types.KeyboardButton(text="📋 Мои объявления"))
-    builder.add(types.KeyboardButton(text="📊 Мои приглашения"))
     builder.add(types.KeyboardButton(text="🔄 Сменить роль"))
-    builder.adjust(2, 2, 2)
+    builder.adjust(2, 2, 1)
     return builder.as_markup(resize_keyboard=True)
 
 def get_country_keyboard():
@@ -1099,7 +837,6 @@ def _cargo_search_menu_labels():
         "🔍 Найти груз",
         "🚛 Найти свободные машины",
         "📋 Мои объявления",
-        "📊 Мои приглашения",
         "🔄 Сменить роль",
         "🟢 Я водитель",
         "🔵 Я логист",
@@ -1220,8 +957,6 @@ async def driver_subscribe_destination(message: types.Message, state: FSMContext
 
 @dp.message(F.text == "🚚 Разместить свободную машину")
 async def driver_add_vehicle_start(message: types.Message, state: FSMContext):
-    if await deny_posting_if_needed(message):
-        return
     await message.answer("Введите город отправления:")
     await state.set_state(DriverStates.adding_vehicle_origin)
 
@@ -1359,38 +1094,10 @@ async def change_role(message: types.Message, state: FSMContext):
     await state.set_state(UserRole.choosing_role)
 
 
-@dp.message(F.text == "📊 Мои приглашения")
-async def my_invites_button(message: types.Message, state: FSMContext):
-    """Show subscription + invite progress and personal invite link."""
-    user = message.from_user
-    remember_telegram_user(user)
-    user_id = user.id
-    if is_free_poster(user_id, username=getattr(user, "username", None)):
-        await message.answer(
-            "Вы можете размещать объявления без "
-            "подписки, приглашений и оплаты."
-        )
-        return
-    channel = await get_channel_label()
-    subscribed = await is_user_subscribed(user_id)
-    invites = get_invite_count(user_id)
-    link = await get_or_create_invite_link(user_id)
-    text = format_post_requirements_text(
-        subscribed=subscribed,
-        invites=invites,
-        channel=channel,
-        invite_link=link,
-    )
-    url = channel_url_for_button(channel)
-    await message.answer(text, reply_markup=post_requirements_keyboard(url))
-
-
 # --- Logistician Handlers ---
 
 @dp.message(F.text == "📦 Разместить груз")
 async def logistician_add_cargo_start(message: types.Message, state: FSMContext):
-    if await deny_posting_if_needed(message):
-        return
     builder = ReplyKeyboardBuilder()
     builder.add(types.KeyboardButton(text="Пошагово"))
     builder.add(types.KeyboardButton(text="Одним сообщением"))
@@ -2279,7 +1986,6 @@ async def search_vehicles_origin(message: types.Message, state: FSMContext):
         "🔍 Найти груз",
         "🚛 Найти свободные машины",
         "📋 Мои объявления",
-        "📊 Мои приглашения",
         "🔄 Сменить роль",
         "🟢 Я водитель",
         "🔵 Я логист",
@@ -2561,171 +2267,6 @@ async def pending_ad_callbacks(callback: CallbackQuery):
     await callback.answer("Неизвестное действие", show_alert=True)
 
 
-@dp.callback_query(F.data.startswith("postreq:"))
-async def post_requirements_callbacks(callback: CallbackQuery):
-    """Inline buttons: check subscription, show link, show invite count."""
-    user = callback.from_user
-    remember_telegram_user(user)
-    user_id = user.id
-    action = (callback.data or "").split(":", 1)[-1]
-
-    if is_free_poster(user_id, username=getattr(user, "username", None)):
-        await callback.answer(
-            "Ограничения не применяются — можно размещать свободно",
-            show_alert=True,
-        )
-        return
-
-    channel = await get_channel_label()
-    url = channel_url_for_button(channel)
-
-    if action == "check":
-        subscribed = await is_user_subscribed(user_id)
-        invites = get_invite_count(user_id)
-        link = await get_or_create_invite_link(user_id)
-        text = format_post_requirements_text(
-            subscribed=subscribed,
-            invites=invites,
-            channel=channel,
-            invite_link=link,
-        )
-        try:
-            await callback.message.edit_text(
-                text, reply_markup=post_requirements_keyboard(url)
-            )
-        except Exception:
-            await callback.message.answer(
-                text, reply_markup=post_requirements_keyboard(url)
-            )
-        if subscribed and invites >= MIN_CHANNEL_INVITES:
-            await callback.answer("Готово! Можно размещать объявления ✅")
-        elif not subscribed:
-            await callback.answer("Сначала подпишитесь на канал", show_alert=True)
-        else:
-            await callback.answer(
-                f"Приглашено {invites} из {MIN_CHANNEL_INVITES}",
-                show_alert=True,
-            )
-        return
-
-    if action == "link":
-        link = await get_or_create_invite_link(user_id)
-        if not link:
-            await callback.answer(
-                "Не удалось создать ссылку. Бот должен быть админом канала.",
-                show_alert=True,
-            )
-            return
-        invites = get_invite_count(user_id)
-        await callback.message.answer(
-            f"🔗 Ваша персональная ссылка для приглашения в {channel}:\n\n"
-            f"{link}\n\n"
-            f"Отправьте её друзьям. Когда они вступят в канал — "
-            f"счётчик вырастет.\n"
-            f"Сейчас приглашено: {invites} из {MIN_CHANNEL_INVITES}",
-            reply_markup=post_requirements_keyboard(url),
-        )
-        await callback.answer("Ссылка отправлена")
-        return
-
-    if action == "invites":
-        subscribed = await is_user_subscribed(user_id)
-        invites = get_invite_count(user_id)
-        link = await get_or_create_invite_link(user_id)
-        text = format_post_requirements_text(
-            subscribed=subscribed,
-            invites=invites,
-            channel=channel,
-            invite_link=link,
-        )
-        await callback.message.answer(
-            text, reply_markup=post_requirements_keyboard(url)
-        )
-        await callback.answer()
-        return
-
-    await callback.answer("Неизвестное действие")
-
-
-@dp.chat_member()
-async def on_channel_chat_member(event: types.ChatMemberUpdated):
-    """Count channel joins via personal invite links created by the bot."""
-    try:
-        chat_id = event.chat.id
-        # Match numeric id or @username channel
-        channel_ref = str(CHANNEL_ID).strip()
-        matched = False
-        if channel_ref.startswith("@"):
-            uname = (event.chat.username or "").lower()
-            if uname and uname == channel_ref.lstrip("@").lower():
-                matched = True
-        else:
-            try:
-                matched = int(channel_ref) == chat_id
-            except ValueError:
-                matched = channel_ref == str(chat_id)
-        if not matched:
-            return
-
-        old_status = _member_status_value(event.old_chat_member)
-        new_status = _member_status_value(event.new_chat_member)
-        # Only count real joins: was not a member → became a member
-        was_member = old_status in _MEMBER_STATUSES
-        is_member = new_status in _MEMBER_STATUSES
-        if was_member or not is_member:
-            return
-
-        invited_user = event.new_chat_member.user
-        if not invited_user or getattr(invited_user, "is_bot", False):
-            return
-        invited_id = invited_user.id
-
-        invite_link = event.invite_link
-        if not invite_link:
-            return
-
-        inviter_id = None
-        link_name = getattr(invite_link, "name", None) or ""
-        if link_name:
-            inviter_id = get_inviter_by_link_name(link_name)
-            if inviter_id is None and link_name.startswith("ref"):
-                # Fallback: parse ref{user_id} even if DB row missing
-                raw = link_name[3:]
-                if raw.isdigit():
-                    inviter_id = int(raw)
-
-        if inviter_id is None:
-            return
-
-        if record_channel_invite(inviter_id, invited_id):
-            count = get_invite_count(inviter_id)
-            logging.info(
-                "Invite credited: inviter=%s invited=%s total=%s",
-                inviter_id,
-                invited_id,
-                count,
-            )
-            try:
-                need = MIN_CHANNEL_INVITES
-                if count >= need:
-                    msg = (
-                        f"🎉 Новый участник по вашей ссылке!\n"
-                        f"Приглашено: {count} из {need} — "
-                        f"можно размещать объявления "
-                        f"(не забудьте сами быть подписаны на канал)."
-                    )
-                else:
-                    msg = (
-                        f"👋 Новый участник по вашей ссылке!\n"
-                        f"Приглашено: {count} из {need}."
-                    )
-                await bot.send_message(inviter_id, msg)
-            except Exception as e:
-                logging.warning("Could not notify inviter %s: %s", inviter_id, e)
-    except Exception as e:
-        logging.error("chat_member handler error: %s", e)
-
-
 @dp.message(Command("pending"))
 async def admin_list_pending(message: types.Message):
     """Admin: list cargo ads waiting for payment confirmation."""
@@ -2794,15 +2335,11 @@ async def main():
     # Ensure polling mode: drop any leftover webhook and stale updates
     # (does not fix two simultaneous polling instances with the same token)
     await bot.delete_webhook(drop_pending_updates=True)
-    # chat_member is required to count channel invites via personal links;
-    # resolve_used_update_types() includes it because of @dp.chat_member.
     allowed = dp.resolve_used_update_types()
     logging.info(
         "Webhook cleared, starting polling "
-        "(updates=%s, post_gate=%s, min_invites=%s, free_usernames=%s, free_ids=%s)",
+        "(updates=%s, free_usernames=%s, free_ids=%s)",
         allowed,
-        POST_REQUIREMENTS_ENABLED,
-        MIN_CHANNEL_INVITES,
         sorted(FREE_POST_USERNAMES) if FREE_POST_USERNAMES else [],
         sorted(FREE_POST_USER_IDS) if FREE_POST_USER_IDS else [],
     )
