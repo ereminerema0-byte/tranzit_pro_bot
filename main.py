@@ -9,7 +9,9 @@ logging.basicConfig(level=logging.INFO)
 
 # Bot configuration
 TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID", "@tranzitpro1")
+# Грузы и свободные машины публикуются в группу «Грузоперевозки».
+# @tranzitpro1 как место публикации не используется.
+PUBLISH_CHAT_DEFAULT = "-1001140181745"
 # Ads always show the contact of the person who posted.
 # CONTACT_USERNAME is intentionally NOT used in announcements (was wrongly
 # substituting one fixed hub username for every cargo). Kept only so old
@@ -92,11 +94,19 @@ if not TOKEN or not str(TOKEN).strip():
     sys.exit(1)
 TOKEN = str(TOKEN).strip()
 
-if not os.getenv("CHANNEL_ID"):
-    logging.warning(
-        "CHANNEL_ID не задан, используется значение по умолчанию: %s",
-        CHANNEL_ID,
-    )
+
+def publish_chat_id():
+    """Чат для объявлений. Пробелы и переносы в CHANNEL_ID отбрасываются перед отправкой."""
+    raw = os.getenv("CHANNEL_ID")
+    cleaned = re.sub(r"[\s\u00a0\u200b\ufeff]+", "", raw or "")
+    if not cleaned or "tranzitpro1" in cleaned.lower():
+        cleaned = PUBLISH_CHAT_DEFAULT
+    if re.fullmatch(r"-?\d+", cleaned):
+        return int(cleaned)
+    return cleaned
+
+
+logging.info("Бот публикует грузы и машины в чат %s", publish_chat_id())
 
 if PAYMENT_ENABLED and ADMIN_ID is None:
     logging.warning(
@@ -511,7 +521,7 @@ def summarize_pending_items(items) -> str:
 
 
 async def publish_cargo_item(item: dict, logistician_id: int, author_telegram_id: int):
-    """Write one cargo to DB, channel and subscribers. item has kind step|parsed."""
+    """Write one cargo to DB, the publish chat and subscribers. item has kind step|parsed."""
     kind = item.get("kind", "step")
     if kind == "parsed":
         weight_val = parse_positive_float(item.get("weight_str", "")) or 0
@@ -529,10 +539,11 @@ async def publish_cargo_item(item: dict, logistician_id: int, author_telegram_id
             user_contact,
         )
         channel_message = format_cargo_message(item) + f"\n🤖 @tranzit_pro_bot"
+        destination = publish_chat_id()
         try:
-            await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
+            await bot.send_message(destination, channel_message, parse_mode="Markdown")
         except Exception as e:
-            logging.error("Failed to publish to channel: %s", e)
+            logging.error("Не удалось опубликовать объявление в %s: %s", destination, e)
         notice = build_cargo_subscriber_notice(
             item["origin"],
             item["destination"],
@@ -580,10 +591,11 @@ async def publish_cargo_item(item: dict, logistician_id: int, author_telegram_id
         f"🤖 *Хотите быстро найти подходящий груз?*\n"
         f"Напишите боту: @tranzit_pro_bot"
     )
+    destination = publish_chat_id()
     try:
-        await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
+        await bot.send_message(destination, channel_message, parse_mode="Markdown")
     except Exception as e:
-        logging.error("Failed to publish to channel: %s", e)
+        logging.error("Не удалось опубликовать объявление в %s: %s", destination, e)
     notice = build_cargo_subscriber_notice(
         item["origin"],
         item["destination"],
@@ -657,6 +669,8 @@ async def request_payment_or_publish(
 # Initialize bot and dispatcher
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+# Объявления принимаются только в личке. В группе бот молчит и не отвечает.
+dp.message.filter(F.chat.type == "private")
 
 # Define states for FSM
 class UserRole(StatesGroup):
@@ -1044,7 +1058,7 @@ async def driver_add_vehicle_contact(message: types.Message, state: FSMContext):
     await message.answer("Ваше объявление о свободной машине размещено!", reply_markup=get_driver_main_keyboard())
     await state.set_state(DriverStates.main_menu)
 
-    # Auto-publish to channel
+    # Auto-publish to the group
     origin_f = f"{user_data.get('origin_flag', '')} {origin_city}".strip()
     dest_f = f"{user_data.get('destination_flag', '')} {dest_city}".strip()
     channel_message = (
@@ -1057,10 +1071,11 @@ async def driver_add_vehicle_contact(message: types.Message, state: FSMContext):
         f"{format_publish_contact(author_contact)}\n\n"
         f"🤖 @tranzit_pro_bot"
     )
+    destination = publish_chat_id()
     try:
-        await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
+        await bot.send_message(destination, channel_message, parse_mode="Markdown")
     except Exception as e:
-        logging.error(f"Failed to publish to channel: {e}")
+        logging.error("Не удалось опубликовать объявление в %s: %s", destination, e)
 
 @dp.message(F.text == "📋 Мои объявления")
 async def view_my_ads_router(message: types.Message, state: FSMContext):
@@ -2338,8 +2353,9 @@ async def main():
     allowed = dp.resolve_used_update_types()
     logging.info(
         "Webhook cleared, starting polling "
-        "(updates=%s, free_usernames=%s, free_ids=%s)",
+        "(updates=%s, publish_chat=%s, free_usernames=%s, free_ids=%s)",
         allowed,
+        publish_chat_id(),
         sorted(FREE_POST_USERNAMES) if FREE_POST_USERNAMES else [],
         sorted(FREE_POST_USER_IDS) if FREE_POST_USER_IDS else [],
     )
