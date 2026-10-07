@@ -12,6 +12,8 @@ TOKEN = os.getenv("BOT_TOKEN")
 # Грузы и свободные машины публикуются в группу «Грузоперевозки».
 # @tranzitpro1 как место публикации не используется.
 PUBLISH_CHAT_DEFAULT = "-1001140181745"
+# Тема форума в этой группе. Без thread id пост идёт в закрытое «Общее» → TOPIC_CLOSED.
+PUBLISH_THREAD_ID = 407642
 # Ads always show the contact of the person who posted.
 # CONTACT_USERNAME is intentionally NOT used in announcements (was wrongly
 # substituting one fixed hub username for every cargo). Kept only so old
@@ -106,7 +108,27 @@ def publish_chat_id():
     return cleaned
 
 
-logging.info("Бот публикует грузы и машины в чат %s", publish_chat_id())
+def _is_forum_publish_chat(chat_id) -> bool:
+    """True for the Грузоперевозки forum group that needs a topic id."""
+    try:
+        return int(chat_id) == int(PUBLISH_CHAT_DEFAULT)
+    except (TypeError, ValueError):
+        return str(chat_id) == PUBLISH_CHAT_DEFAULT
+
+
+def forum_thread_kwargs(chat_id=None) -> dict:
+    """message_thread_id for forum publishes. Skip it for any other chat."""
+    dest = publish_chat_id() if chat_id is None else chat_id
+    if _is_forum_publish_chat(dest):
+        return {"message_thread_id": PUBLISH_THREAD_ID}
+    return {}
+
+
+logging.info(
+    "Бот публикует грузы и машины в чат %s (тема %s)",
+    publish_chat_id(),
+    PUBLISH_THREAD_ID if _is_forum_publish_chat(publish_chat_id()) else "—",
+)
 
 if PAYMENT_ENABLED and ADMIN_ID is None:
     logging.warning(
@@ -539,11 +561,14 @@ async def publish_cargo_item(item: dict, logistician_id: int, author_telegram_id
             user_contact,
         )
         channel_message = format_cargo_message(item) + f"\n🤖 @tranzit_pro_bot"
-        destination = publish_chat_id()
         try:
-            await bot.send_message(destination, channel_message, parse_mode="Markdown")
+            await publish_send_message(channel_message, parse_mode="Markdown")
         except Exception as e:
-            logging.error("Не удалось опубликовать объявление в %s: %s", destination, e)
+            logging.error(
+                "Не удалось опубликовать объявление в %s: %s",
+                publish_chat_id(),
+                e,
+            )
         notice = build_cargo_subscriber_notice(
             item["origin"],
             item["destination"],
@@ -591,11 +616,14 @@ async def publish_cargo_item(item: dict, logistician_id: int, author_telegram_id
         f"🤖 *Хотите быстро найти подходящий груз?*\n"
         f"Напишите боту: @tranzit_pro_bot"
     )
-    destination = publish_chat_id()
     try:
-        await bot.send_message(destination, channel_message, parse_mode="Markdown")
+        await publish_send_message(channel_message, parse_mode="Markdown")
     except Exception as e:
-        logging.error("Не удалось опубликовать объявление в %s: %s", destination, e)
+        logging.error(
+            "Не удалось опубликовать объявление в %s: %s",
+            publish_chat_id(),
+            e,
+        )
     notice = build_cargo_subscriber_notice(
         item["origin"],
         item["destination"],
@@ -671,6 +699,30 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 # Объявления принимаются только в личке. В группе бот молчит и не отвечает.
 dp.message.filter(F.chat.type == "private")
+
+
+async def publish_send_message(text, **kwargs):
+    """send_message into the ads group, always into the open forum topic."""
+    dest = publish_chat_id()
+    extra = forum_thread_kwargs(dest)
+    extra.update(kwargs)
+    return await bot.send_message(dest, text, **extra)
+
+
+async def publish_send_photo(photo, **kwargs):
+    """send_photo into the ads group, always into the open forum topic."""
+    dest = publish_chat_id()
+    extra = forum_thread_kwargs(dest)
+    extra.update(kwargs)
+    return await bot.send_photo(dest, photo, **extra)
+
+
+async def publish_copy_message(from_chat_id, message_id, **kwargs):
+    """copy_message into the ads group, always into the open forum topic."""
+    dest = publish_chat_id()
+    extra = forum_thread_kwargs(dest)
+    extra.update(kwargs)
+    return await bot.copy_message(dest, from_chat_id, message_id, **extra)
 
 # Define states for FSM
 class UserRole(StatesGroup):
@@ -1071,11 +1123,14 @@ async def driver_add_vehicle_contact(message: types.Message, state: FSMContext):
         f"{format_publish_contact(author_contact)}\n\n"
         f"🤖 @tranzit_pro_bot"
     )
-    destination = publish_chat_id()
     try:
-        await bot.send_message(destination, channel_message, parse_mode="Markdown")
+        await publish_send_message(channel_message, parse_mode="Markdown")
     except Exception as e:
-        logging.error("Не удалось опубликовать объявление в %s: %s", destination, e)
+        logging.error(
+            "Не удалось опубликовать объявление в %s: %s",
+            publish_chat_id(),
+            e,
+        )
 
 @dp.message(F.text == "📋 Мои объявления")
 async def view_my_ads_router(message: types.Message, state: FSMContext):
@@ -2353,9 +2408,10 @@ async def main():
     allowed = dp.resolve_used_update_types()
     logging.info(
         "Webhook cleared, starting polling "
-        "(updates=%s, publish_chat=%s, free_usernames=%s, free_ids=%s)",
+        "(updates=%s, publish_chat=%s, thread=%s, free_usernames=%s, free_ids=%s)",
         allowed,
         publish_chat_id(),
+        PUBLISH_THREAD_ID if _is_forum_publish_chat(publish_chat_id()) else None,
         sorted(FREE_POST_USERNAMES) if FREE_POST_USERNAMES else [],
         sorted(FREE_POST_USER_IDS) if FREE_POST_USER_IDS else [],
     )
